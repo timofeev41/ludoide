@@ -3,7 +3,14 @@ name: build
 on:
   push:
   pull_request:
+  release:
+    types: [published]
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Attach the macOS app to this existing release tag (optional)"
+        required: false
+        default: ""
 
 jobs:
   test:
@@ -16,8 +23,15 @@ jobs:
 
   macos:
     runs-on: macos-14
+    permissions:
+      contents: write
+    env:
+      # Set for published releases, or when a tag is given to a manual run.
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.RELEASE_TAG || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -28,3 +42,8 @@ jobs:
         with:
           name: Ludo-macos
           path: dist/*.zip
+      - name: Attach to release
+        if: env.RELEASE_TAG != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$RELEASE_TAG" dist/*.zip --clobber --repo "$GITHUB_REPOSITORY"

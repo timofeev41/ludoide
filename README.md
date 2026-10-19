@@ -69,8 +69,12 @@ scripts/bundle_macos.sh                        # dist/Ludo.app (universal) + zip
 scripts/bundle_macos.sh --native               # host architecture only (faster)
 ```
 
-Every push builds a universal `Ludo.app` on GitHub Actions (artifact **Ludo-macos**). The app is ad-hoc signed,
-not notarized. On first launch, right-click → Open, or run `xattr -dr com.apple.quarantine Ludo.app`.
+Every push builds a universal `Ludo.app` on GitHub Actions (artifact **Ludo-macos**). Publishing a GitHub release
+attaches `Ludo-<version>-macos.zip` to it automatically. For an existing release, run the **build** workflow manually
+(Actions → build → Run workflow) and enter the tag.
+
+The app is ad-hoc signed, not notarized, so macOS blocks it the first time. After unzipping, either run
+`xattr -dr com.apple.quarantine Ludo.app` or open it once and allow it in System Settings → Privacy & Security → *Open Anyway*.
 
 ## Architecture
 
