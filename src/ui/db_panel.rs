@@ -100,6 +100,8 @@ pub struct DbState {
     /// Database used for queries per connection (overrides the connection default).
     pub current_db: HashMap<String, String>,
     test_rx: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// Bumped per connection on "Deactivate" so its tree starts collapsed again.
+    collapse_gen: HashMap<String, u64>,
 }
 
 impl DbState {
@@ -111,6 +113,7 @@ impl DbState {
             log: Vec::new(),
             result: None,
             running: None,
+            collapse_gen: HashMap::new(),
             queue: VecDeque::new(),
             script_total: 0,
             script_cfg: None,
@@ -180,6 +183,7 @@ impl DbState {
 
 enum DbAction {
     Activate(String),
+    Deactivate(String),
     Edit(String),
     Delete(String),
     Refresh(String),
@@ -277,7 +281,7 @@ impl App {
         let id = cfg.id.clone();
         let current_db = self.db.database_for(cfg);
         let header = CollapsingHeader::new(title)
-            .id_salt(("conn", &cfg.id, !search.is_empty()))
+            .id_salt(("conn", &cfg.id, !search.is_empty(), self.db.collapse_gen.get(&cfg.id).copied().unwrap_or(0)))
             .open(if search.is_empty() { None } else { Some(true) })
             .show(ui, |ui| {
                 enum Snap {
@@ -369,7 +373,17 @@ impl App {
         }
         hr.on_hover_text(format!("{}\nuser: {}\nDouble-click to make active", cfg.url, cfg.username)).context_menu(
             |ui| {
-                if ui.button("Make active").clicked() {
+                if active {
+                    if ui
+                        .button(format!("{} Deactivate", icon::PLUGS))
+                        .on_hover_text(
+                            "Disconnect now (a running query is cancelled); pick another connection to continue",
+                        )
+                        .clicked()
+                    {
+                        actions.push(DbAction::Deactivate(cfg.id.clone()));
+                    }
+                } else if ui.button("Make active").clicked() {
                     actions.push(DbAction::Activate(cfg.id.clone()));
                 }
                 if ui.button("New SQL console").clicked() {
@@ -583,10 +597,31 @@ impl App {
         });
     }
 
+    /// Disconnect: cancel what runs on the connection, drop its loaded tree and
+    /// leave no connection active until another one is picked.
+    pub fn deactivate_connection(&mut self, id: &str) {
+        if self.db.running.as_ref().is_some_and(|r| r.conn_id == id) {
+            if let Some(cfg) = self.connection(id).cloned() {
+                self.db.cancel(&cfg, self.timeout());
+            }
+            self.db.running = None;
+            self.db.script_cfg = None;
+        }
+        self.db.trees.remove(id);
+        self.db.current_db.remove(id);
+        *self.db.collapse_gen.entry(id.to_owned()).or_default() += 1;
+        if self.settings.coding.active_connection.as_deref() == Some(id) {
+            self.settings.coding.active_connection = None;
+        }
+        let name = self.connection(id).map(|c| c.display_name()).unwrap_or_default();
+        self.notify(format!("Disconnected from '{name}' — pick a connection to continue"));
+    }
+
     fn apply_db_actions(&mut self, actions: Vec<DbAction>) {
         for a in actions {
             match a {
                 DbAction::Activate(id) => self.settings.coding.active_connection = Some(id),
+                DbAction::Deactivate(id) => self.deactivate_connection(&id),
                 DbAction::Edit(id) => {
                     if let Some(cfg) = self.connection(&id).cloned() {
                         self.db.editing = Some(ConnEditor::new(cfg, false));
@@ -735,9 +770,12 @@ impl App {
                 _ => {}
             },
             (Request::Query { sql, query_id, .. }, r) => {
-                if self.db.running.as_ref().is_some_and(|run| run.query_id == query_id) {
-                    self.db.running = None;
+                // A reply for a query that is no longer running (its connection was
+                // deactivated) is only logged, not shown.
+                if !self.db.running.as_ref().is_some_and(|run| run.query_id == query_id) {
+                    return;
                 }
+                self.db.running = None;
                 let outcome = match r {
                     Ok(Payload::Query(q)) => Ok(q),
                     Ok(_) => Err("unexpected response".into()),
@@ -752,7 +790,9 @@ impl App {
                 self.db.next_statement();
             }
             (Request::Cancel { .. }, r) => match r {
-                Ok(_) => self.notify("Cancellation requested"),
+                // After "Deactivate" nothing is running any more and its own message stays.
+                Ok(_) if self.db.running.is_some() => self.notify("Cancellation requested"),
+                Ok(_) => {}
                 Err(e) => self.error(format!("Cancel failed: {e}")),
             },
         }

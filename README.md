@@ -9,6 +9,8 @@ It's built for ClickHouse work, benthos/dbt YAML, SQL scratches and the odd Airf
 
 **Databases (right panel)**
 - ClickHouse over HTTP(S). Add several connections; a URL + user pair can only exist once.
+- **Deactivate** (right-click the active connection, or the editor's connection picker) disconnects at once: a running
+  query is killed on the server, the tree is closed, and nothing runs until you pick another connection.
 - Passwords are stored in the **macOS Keychain** (service "Ludo database connection"), never in `settings.json`.
   Passwords from older settings files move there automatically on first launch.
 - Browse databases → tables / views / materialized views / dictionaries / skip indices → columns.

@@ -275,6 +275,7 @@ impl App {
             None => format!("{} {current}", icon::DATABASE),
         };
         let conns = self.settings.coding.connections.clone();
+        let mut disconnect = None;
         egui::ComboBox::from_id_salt("conn_picker")
             .selected_text(RichText::new(label).small().color(p.text_dim))
             .show_ui(ui, |ui| {
@@ -286,8 +287,20 @@ impl App {
                 }
                 if conns.is_empty() {
                     ui.label(dim("Add a connection in the Databases panel", &p));
+                } else if let Some(id) = self.settings.coding.active_connection.clone() {
+                    ui.separator();
+                    if ui
+                        .button(format!("{} Deactivate", icon::PLUGS))
+                        .on_hover_text("Disconnect from the active connection")
+                        .clicked()
+                    {
+                        disconnect = Some(id);
+                    }
                 }
             });
+        if let Some(id) = disconnect {
+            self.deactivate_connection(&id);
+        }
     }
 
     fn save_current_as(&mut self) {
