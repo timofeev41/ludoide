@@ -51,6 +51,12 @@ pub struct CodingSettings {
     /// Rows kept in the result grid for regular queries.
     pub max_result_rows: usize,
     pub query_timeout_secs: u64,
+    /// Default format of the results "Copy" button.
+    pub copy_format: crate::db::export::CopyFormat,
+    /// Last values typed for dbt `env_var`/`var` variables, by name.
+    pub dbt_vars: std::collections::HashMap<String, String>,
+    /// Schema used for `ref()` per dbt project name (default `<project>_marts`).
+    pub dbt_ref_schema: std::collections::HashMap<String, String>,
 }
 
 impl Default for CodingSettings {
@@ -65,6 +71,9 @@ impl Default for CodingSettings {
             inspect_limit: 500,
             max_result_rows: 10_000,
             query_timeout_secs: 300,
+            copy_format: Default::default(),
+            dbt_vars: Default::default(),
+            dbt_ref_schema: Default::default(),
         }
     }
 }

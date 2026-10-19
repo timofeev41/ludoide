@@ -20,6 +20,8 @@ pub struct Workspace {
     pub roots: Vec<PathBuf>,
     cache: HashMap<PathBuf, Vec<Entry>>,
     pub filter: String,
+    /// Bumped by "Collapse all": fresh header ids start closed.
+    collapse_gen: u64,
 }
 
 const IGNORED: &[&str] = &[".git", "__pycache__", ".DS_Store", ".idea", ".mypy_cache", ".pytest_cache", ".ruff_cache"];
@@ -97,6 +99,7 @@ enum Action {
     Terminal(PathBuf),
     RemoveRoot(PathBuf),
     NewScratch(PathBuf, &'static str),
+    Claude(PathBuf),
     Refresh(PathBuf),
 }
 
@@ -120,6 +123,9 @@ impl App {
         ui.horizontal(|ui| {
             section_header(ui, "Explorer", &p);
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if small_icon_button(ui, icon::ARROWS_IN_LINE_VERTICAL, "Collapse all", &p).clicked() {
+                    self.workspace.collapse_gen += 1;
+                }
                 if small_icon_button(ui, icon::ARROWS_CLOCKWISE, "Refresh", &p).clicked() {
                     self.workspace.invalidate_all();
                 }
@@ -159,8 +165,8 @@ impl App {
                 let name =
                     root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
                 let header = CollapsingHeader::new(RichText::new(format!("{} {name}", icon::FOLDER)).strong())
-                    .id_salt(("root", root))
-                    .default_open(true)
+                    .id_salt(("root", root, self.workspace.collapse_gen))
+                    .default_open(self.workspace.collapse_gen == 0)
                     .show(ui, |ui| self.dir_tree(ui, root, &filter, show_hidden, false, &mut actions));
                 header.header_response.on_hover_text(root.display().to_string()).context_menu(|ui| {
                     dir_menu(ui, root, false, &mut actions);
@@ -174,8 +180,8 @@ impl App {
             // The permanent scratches directory is always listed, whatever project is open.
             let header =
                 CollapsingHeader::new(RichText::new(format!("{} Scratches", icon::STAR)).strong().color(p.accent))
-                    .id_salt("scratches_root")
-                    .default_open(true)
+                    .id_salt(("scratches_root", self.workspace.collapse_gen))
+                    .default_open(self.workspace.collapse_gen == 0)
                     .show(ui, |ui| self.dir_tree(ui, &scratches, &filter, show_hidden, true, &mut actions));
             header
                 .header_response
@@ -206,7 +212,7 @@ impl App {
         for e in entries {
             if e.is_dir {
                 let r = CollapsingHeader::new(format!("{} {}", icon::FOLDER, e.name))
-                    .id_salt(("dir", &e.path))
+                    .id_salt(("dir", &e.path, self.workspace.collapse_gen))
                     .default_open(!filter.is_empty())
                     .show(ui, |ui| self.dir_tree(ui, &e.path, filter, hidden, scratch, actions));
                 r.header_response.context_menu(|ui| dir_menu(ui, &e.path, scratch, actions));
@@ -260,6 +266,11 @@ impl App {
                 Action::Terminal(dir) => self.new_terminal(None, None, Some(dir), ctx),
                 Action::RemoveRoot(root) => self.workspace.roots.retain(|r| r != &root),
                 Action::NewScratch(dir, ext) => self.new_scratch(&dir, ext),
+                Action::Claude(dir) => {
+                    // Always the project root (or Scratches), even from a nested folder.
+                    let root = self.root_for(&dir).unwrap_or(dir);
+                    self.launch_claude(None, Some(root), ctx);
+                }
                 Action::Refresh(dir) => self.workspace.invalidate(&dir),
             }
         }
@@ -358,6 +369,11 @@ fn dir_menu(ui: &mut egui::Ui, dir: &Path, scratch: bool, actions: &mut Vec<Acti
         }
         ui.separator();
     }
+    if ui.button(format!("{} Open in Claude", icon::SPARKLE)).on_hover_text("Claude Code in the project root").clicked()
+    {
+        actions.push(Action::Claude(dir.to_path_buf()));
+    }
+    ui.separator();
     if ui.button("New file…").clicked() {
         actions.push(Action::Dialog(DialogKind::NewFile, dir.to_path_buf()));
     }

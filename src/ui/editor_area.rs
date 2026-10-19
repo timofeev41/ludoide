@@ -143,17 +143,20 @@ impl App {
         let ctx = ui.ctx().clone();
         let Some(doc) = self.tabs.current() else { return };
         let lang = languages::get(doc.lang);
-        let path_text = doc.path.as_ref().map_or_else(
-            || format!("{} (not saved)", doc.title),
-            |pth| match self.root_for(pth) {
-                Some(root) => format!(
-                    "{} › {}",
-                    root.file_name().unwrap_or_default().to_string_lossy(),
-                    pth.strip_prefix(&root).unwrap_or(pth).display()
-                ),
-                None => pth.display().to_string(),
-            },
-        );
+        // Just the project the file belongs to; the full path is in the tooltip.
+        let (path_text, path_tip) = match &doc.path {
+            None => (format!("{} (not saved)", doc.title), String::new()),
+            Some(pth) => {
+                let name = match self.root_for(pth) {
+                    Some(root) if root == self.settings.other.scratches_dir => "Scratches".to_owned(),
+                    Some(root) => root.file_name().unwrap_or_default().to_string_lossy().into_owned(),
+                    None => pth.parent().and_then(|d| d.file_name()).unwrap_or_default().to_string_lossy().into_owned(),
+                };
+                (name, pth.display().to_string())
+            }
+        };
+        let is_dbt = doc.dbt.is_some();
+        let mut compile = false;
         let previewable = lang.previewable;
         let runner = lang.runner;
         let md_mode = doc.md_mode;
@@ -165,7 +168,10 @@ impl App {
         let mut ask_claude = false;
         egui::Frame::new().inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(dim(path_text, &p).small());
+                let r = ui.label(dim(format!("{} {path_text}", icon::FOLDER_SIMPLE), &p).small());
+                if !path_tip.is_empty() {
+                    r.on_hover_text(path_tip);
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if has_path && small_icon_button(ui, icon::SPARKLE, "Ask Claude Code about this file", &p).clicked()
                     {
@@ -188,6 +194,22 @@ impl App {
                     }
                     match runner {
                         Runner::Database => {
+                            if is_dbt
+                                && ui
+                                    .add(
+                                        egui::Button::new(
+                                            RichText::new(format!("{} Compile", icon::BRACKETS_CURLY)).color(p.accent),
+                                        )
+                                        .frame(false),
+                                    )
+                                    .on_hover_text(
+                                        "Resolve dbt Jinja (env_var/var, source, ref, config) into plain SQL\n\
+                                         saved in Scratches/compiled/<project>/ — ready to run",
+                                    )
+                                    .clicked()
+                            {
+                                compile = true;
+                            }
                             if ui
                                 .add(
                                     egui::Button::new(
@@ -237,6 +259,9 @@ impl App {
                 d.md_mode = m;
             }
         }
+        if compile {
+            self.open_compile_dialog();
+        }
         if let Some(whole) = run {
             self.run_current(whole, &ctx);
         }
@@ -245,7 +270,7 @@ impl App {
         }
         if ask_claude {
             if let Some(path) = self.tabs.current().and_then(|d| d.path.clone()) {
-                self.launch_claude(Some(format!("Let's work on {}", path.display())), &ctx);
+                self.launch_claude(Some(format!("Let's work on {}", path.display())), None, &ctx);
             }
         }
     }

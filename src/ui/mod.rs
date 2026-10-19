@@ -1,6 +1,7 @@
 pub mod bottom;
 pub mod chrome;
 pub mod db_panel;
+pub mod dbt_compile;
 pub mod editor_area;
 pub mod files;
 pub mod find;

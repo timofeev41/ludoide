@@ -45,6 +45,8 @@ pub struct Document {
     pub(crate) deferred_events: Vec<egui::Event>,
     /// Selection to apply on the next frame (char range), e.g. from Find.
     pub pending_select: Option<(usize, usize)>,
+    /// dbt project this file belongs to (enables Compile).
+    pub dbt: Option<crate::dbt::DbtProject>,
 }
 
 fn next_uid() -> u64 {
@@ -62,6 +64,7 @@ impl Document {
         let mut doc = Self::scratch(String::new(), text, lang);
         doc.disk_mtime = mtime(path);
         doc.path = Some(path.to_path_buf());
+        doc.dbt = crate::dbt::DbtProject::for_file(path);
         doc.md_mode = if lang == LangId::Markdown { MdMode::Split } else { MdMode::Edit };
         Ok(doc)
     }
@@ -88,6 +91,7 @@ impl Document {
             wants_focus: 3,
             deferred_events: Vec::new(),
             pending_select: None,
+            dbt: None,
         }
     }
 
@@ -241,6 +245,7 @@ impl Tabs {
                 if let Ok(rest) = p.strip_prefix(from) {
                     let np = if rest.as_os_str().is_empty() { to.to_path_buf() } else { to.join(rest) };
                     d.lang = languages::detect(&np);
+                    d.dbt = crate::dbt::DbtProject::for_file(&np);
                     d.path = Some(np);
                 }
             }

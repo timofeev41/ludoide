@@ -2,6 +2,7 @@
 
 mod app;
 mod db;
+mod dbt;
 mod editor;
 mod fonts;
 mod git;

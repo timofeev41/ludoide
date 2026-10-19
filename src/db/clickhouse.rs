@@ -121,6 +121,56 @@ impl ClickHouse {
             .unwrap_or_default())
     }
 
+    /// Tables, views, dictionaries and skip indices, for one database or all of them.
+    fn load_objects(&self, db: Option<&str>, log: &mut DebugLog) -> Result<Vec<(String, SchemaObject)>, String> {
+        let filter = db.map_or_else(String::new, |d| format!("WHERE database = {}", lit(d)));
+        let num = |v: &Value| match v {
+            Value::Number(n) => n.as_u64(),
+            Value::String(s) => s.parse().ok(),
+            _ => None,
+        };
+        let mut out: Vec<(String, SchemaObject)> = self
+            .rows(
+                &format!(
+                    "SELECT database, name, engine, total_rows, total_bytes FROM system.tables {filter} \
+                     ORDER BY database, name"
+                ),
+                log,
+            )?
+            .iter()
+            .map(|r| {
+                let engine = cell_to_string(&r[2]);
+                let obj = SchemaObject {
+                    name: cell_to_string(&r[1]),
+                    kind: object_kind(&engine),
+                    detail: engine,
+                    parent: None,
+                    rows: num(&r[3]),
+                    bytes: num(&r[4]),
+                };
+                (cell_to_string(&r[0]), obj)
+            })
+            .collect();
+        // Older servers may lack the table; the tree still works without indices.
+        if let Ok(rows) = self.rows(
+            &format!("SELECT database, table, name, type, expr FROM system.data_skipping_indices {filter} ORDER BY table, name"),
+            log,
+        ) {
+            out.extend(rows.iter().map(|r| {
+                let obj = SchemaObject {
+                    name: cell_to_string(&r[2]),
+                    kind: ObjectKind::Index,
+                    detail: format!("{} · {}", cell_to_string(&r[3]), cell_to_string(&r[4])),
+                    parent: Some(cell_to_string(&r[1])),
+                    rows: None,
+                    bytes: None,
+                };
+                (cell_to_string(&r[0]), obj)
+            }));
+        }
+        Ok(out)
+    }
+
     fn text(&self, sql: &str, log: &mut DebugLog) -> Result<String, String> {
         Ok(self.post(&format!("{sql} FORMAT TSVRaw"), &[], log)?.body)
     }
@@ -176,52 +226,11 @@ impl Driver for ClickHouse {
     }
 
     fn objects(&self, db: &str, log: &mut DebugLog) -> Result<Vec<SchemaObject>, String> {
-        let mut out: Vec<SchemaObject> = self
-            .rows(
-                &format!(
-                    "SELECT name, engine, total_rows, total_bytes FROM system.tables \
-                     WHERE database = {} ORDER BY name",
-                    lit(db)
-                ),
-                log,
-            )?
-            .iter()
-            .map(|r| {
-                let engine = cell_to_string(&r[1]);
-                let num = |v: &Value| match v {
-                    Value::Number(n) => n.as_u64(),
-                    Value::String(s) => s.parse().ok(),
-                    _ => None,
-                };
-                SchemaObject {
-                    name: cell_to_string(&r[0]),
-                    kind: object_kind(&engine),
-                    detail: engine,
-                    parent: None,
-                    rows: num(&r[2]),
-                    bytes: num(&r[3]),
-                }
-            })
-            .collect();
-        // Older servers may lack the table; the tree still works without indices.
-        if let Ok(rows) = self.rows(
-            &format!(
-                "SELECT table, name, type, expr FROM system.data_skipping_indices \
-                 WHERE database = {} ORDER BY table, name",
-                lit(db)
-            ),
-            log,
-        ) {
-            out.extend(rows.iter().map(|r| SchemaObject {
-                name: cell_to_string(&r[1]),
-                kind: ObjectKind::Index,
-                detail: format!("{} · {}", cell_to_string(&r[2]), cell_to_string(&r[3])),
-                parent: Some(cell_to_string(&r[0])),
-                rows: None,
-                bytes: None,
-            }));
-        }
-        Ok(out)
+        Ok(self.load_objects(Some(db), log)?.into_iter().map(|(_, o)| o).collect())
+    }
+
+    fn all_objects(&self, log: &mut DebugLog) -> Result<Vec<(String, SchemaObject)>, String> {
+        self.load_objects(None, log)
     }
 
     fn columns(&self, db: &str, object: &str, log: &mut DebugLog) -> Result<Vec<Column>, String> {
@@ -385,6 +394,9 @@ mod tests {
         assert!(ch.ping(&mut log).unwrap().starts_with("ClickHouse"));
         assert!(ch.databases(&mut log).unwrap().contains(&"analytics".to_owned()));
         let objs = ch.objects("analytics", &mut log).unwrap();
+        let all = ch.all_objects(&mut log).unwrap();
+        assert!(all.iter().any(|(d, o)| d == "analytics" && o.name == "events"));
+        assert!(all.iter().any(|(d, _)| d == "system"));
         let kind = |n: &str| objs.iter().find(|o| o.name == n).map(|o| o.kind);
         assert_eq!(kind("events"), Some(ObjectKind::Table));
         assert_eq!(kind("v_buys"), Some(ObjectKind::View));

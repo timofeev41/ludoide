@@ -18,6 +18,8 @@ pub struct TerminalSession {
     pub exited: Option<String>,
     size: (u16, u16),
     scroll_offset: usize,
+    /// Mouse selection as (anchor, head) cells `(row, col)` on the visible screen.
+    selection: Option<((u16, u16), (u16, u16))>,
 }
 
 pub struct SpawnSpec {
@@ -96,11 +98,13 @@ impl TerminalSession {
             exited: None,
             size: (rows, cols),
             scroll_offset: 0,
+            selection: None,
         })
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
         self.scroll_offset = 0;
+        self.selection = None;
         let _ = self.writer.write_all(bytes);
         let _ = self.writer.flush();
     }
@@ -122,6 +126,49 @@ impl TerminalSession {
         if let Ok(mut p) = self.parser.lock() {
             p.set_size(std::num::NonZeroU16::new(rows).unwrap(), std::num::NonZeroU16::new(cols).unwrap());
         }
+    }
+
+    /// Ordered `(start, end_inclusive)` of the selection.
+    fn selection_range(&self) -> Option<((u16, u16), (u16, u16))> {
+        let (a, b) = self.selection?;
+        Some(if a <= b { (a, b) } else { (b, a) })
+    }
+
+    /// Text of the current selection (lines joined with `\n`, trailing spaces trimmed).
+    pub fn selected_text(&self) -> Option<String> {
+        let (s, e) = self.selection_range()?;
+        let parser = self.parser.lock().ok()?;
+        let text = parser.screen().contents_between(s.0, s.1, e.0, e.1 + 1);
+        let text: Vec<&str> = text.lines().map(str::trim_end).collect();
+        Some(text.join("\n")).filter(|t| !t.is_empty())
+    }
+
+    /// Everything currently visible.
+    pub fn visible_text(&self) -> String {
+        self.parser.lock().map(|p| p.screen().contents()).unwrap_or_default()
+    }
+
+    fn word_at(&self, row: u16, col: u16) -> Option<((u16, u16), (u16, u16))> {
+        let parser = self.parser.lock().ok()?;
+        let screen = parser.screen();
+        let cols = screen.size().1.get();
+        let is_word = |c: u16| {
+            screen.cell(row, c).is_some_and(|cell| {
+                let t = cell.contents();
+                !t.is_empty() && !t.chars().all(char::is_whitespace)
+            })
+        };
+        if !is_word(col) {
+            return None;
+        }
+        let (mut a, mut b) = (col, col);
+        while a > 0 && is_word(a - 1) {
+            a -= 1;
+        }
+        while b + 1 < cols && is_word(b + 1) {
+            b += 1;
+        }
+        Some(((row, a), (row, b)))
     }
 
     pub fn kill(&mut self) {
@@ -211,14 +258,53 @@ pub fn show(ui: &mut egui::Ui, term: &mut TerminalSession, p: &Palette, font_siz
     let id = Id::unique(("terminal", term.uid));
     let avail = ui.available_size();
     let (rect, _) = ui.allocate_exact_size(avail, Sense::hover());
-    let response = ui.interact(rect, id, Sense::click());
+    let response = ui.interact(rect, id, Sense::click_and_drag());
     let rows = ((rect.height() - 8.0) / row_h).floor().max(2.0) as u16;
     let cols = ((rect.width() - 12.0) / char_w).floor().max(10.0) as u16;
     term.resize(rows, cols);
 
-    if response.clicked() {
+    let origin = rect.min + vec2(6.0, 4.0);
+    let cell_at = |pos: egui::Pos2| -> (u16, u16) {
+        let r = ((pos.y - origin.y) / row_h).floor().clamp(0.0, (rows - 1) as f32) as u16;
+        let c = ((pos.x - origin.x) / char_w).floor().clamp(0.0, (cols - 1) as f32) as u16;
+        (r, c)
+    };
+    // Mouse selection: drag to select, double-click selects a word, click clears.
+    if response.drag_started() {
+        if let Some(pos) = ui.input(|i| i.pointer.press_origin()) {
+            let c = cell_at(pos);
+            term.selection = Some((c, c));
+        }
+        response.request_focus();
+    } else if response.dragged() {
+        if let (Some(pos), Some((a, _))) = (response.interact_pointer_pos(), term.selection) {
+            term.selection = Some((a, cell_at(pos)));
+        }
+    }
+    if response.double_clicked() {
+        if let Some(pos) = response.interact_pointer_pos() {
+            let (r, c) = cell_at(pos);
+            term.selection = term.word_at(r, c);
+        }
+    } else if response.clicked() {
+        term.selection = None;
         response.request_focus();
     }
+    let selected = term.selected_text();
+    response.context_menu(|ui| {
+        if ui.add_enabled(selected.is_some(), egui::Button::new("Copy")).clicked() {
+            ui.ctx().copy_text(selected.clone().unwrap_or_default());
+            ui.close();
+        }
+        if ui.button("Copy visible output").clicked() {
+            ui.ctx().copy_text(term.visible_text());
+            ui.close();
+        }
+        if ui.button("Clear screen").clicked() {
+            term.write(b"\x0c");
+            ui.close();
+        }
+    });
     let focused = response.has_focus();
     if focused {
         ui.memory_mut(|m| {
@@ -231,6 +317,12 @@ pub fn show(ui: &mut egui::Ui, term: &mut TerminalSession, p: &Palette, font_siz
         let events = ui.input(|i| i.events.clone());
         for ev in events {
             match ev {
+                // ⌘C (Ctrl+Shift+C elsewhere) copies the selection instead of reaching the shell.
+                egui::Event::Copy => {
+                    if let Some(t) = &selected {
+                        ui.ctx().copy_text(t.clone());
+                    }
+                }
                 egui::Event::Text(t) => term.write(t.as_bytes()),
                 egui::Event::Paste(t) => term.write(t.replace("\r\n", "\n").as_bytes()),
                 egui::Event::Key { key, pressed: true, modifiers, .. } => {
@@ -249,6 +341,9 @@ pub fn show(ui: &mut egui::Ui, term: &mut TerminalSession, p: &Palette, font_siz
         let dy = ui.input(|i| i.smooth_scroll_delta.y);
         if dy.abs() > 0.0 {
             let lines = (dy / row_h).round() as i64;
+            if lines != 0 {
+                term.selection = None;
+            }
             let max = term.parser.lock().map(|p| p.screen().scrollback_capacity()).unwrap_or(0) as i64;
             term.scroll_offset = (term.scroll_offset as i64 + lines).clamp(0, max) as usize;
         }
@@ -261,7 +356,7 @@ pub fn show(ui: &mut egui::Ui, term: &mut TerminalSession, p: &Palette, font_siz
     term.scroll_offset = parser.screen().scrollback();
     let screen = parser.screen();
     let (srows, scols) = screen.size();
-    let origin = rect.min + vec2(6.0, 4.0);
+    let sel = term.selection_range();
     for r in 0..srows.get() {
         let mut job = LayoutJob::default();
         let y = origin.y + r as f32 * row_h;
@@ -302,6 +397,16 @@ pub fn show(ui: &mut egui::Ui, term: &mut TerminalSession, p: &Palette, font_siz
             }
             job.append(s, 0.0, fmt);
             c += 1;
+        }
+        // Selection highlight for this row, under the text.
+        if let Some(((sr, sc), (er, ec))) = sel {
+            if r >= sr && r <= er {
+                let from = if r == sr { sc } else { 0 };
+                let to = if r == er { ec + 1 } else { scols.get() };
+                let x0 = origin.x + from as f32 * char_w;
+                let x1 = origin.x + to as f32 * char_w;
+                painter.rect_filled(egui::Rect::from_x_y_ranges(x0..=x1, y..=y + row_h), 0.0, p.selection);
+            }
         }
         let galley = ui.fonts_mut(|f| f.layout_job(job));
         painter.galley(egui::pos2(origin.x, y), galley, p.text);

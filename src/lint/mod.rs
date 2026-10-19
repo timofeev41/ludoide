@@ -29,7 +29,8 @@ pub struct LintContext<'a> {
 
 pub fn lint(lang: LangId, text: &str, ctx: &LintContext) -> Vec<Diagnostic> {
     let mut out = match lang {
-        LangId::Sql if ctx.sql => sql::lint(text, ctx.sql_dialect),
+        // dbt models: Jinja is blanked out first, so only the SQL is checked.
+        LangId::Sql if ctx.sql => sql::lint(&crate::dbt::strip_for_lint(text), ctx.sql_dialect),
         LangId::Yaml if ctx.yaml => yaml::lint(text),
         _ => Vec::new(),
     };

@@ -2,6 +2,7 @@
 
 use super::{dim, panel_frame, section_header, small_icon_button};
 use crate::app::{App, Confirm};
+use crate::db::search::{ObjectFilter, Search};
 use crate::db::worker::{Payload, Request, Response, Worker};
 use crate::db::{self, Column, ConnectionConfig, DriverKind, ObjectKind, QueryResult, SchemaObject};
 use crate::editor::Document;
@@ -23,6 +24,8 @@ pub struct ConnTree {
     pub databases: Option<Loadable<Vec<String>>>,
     pub objects: HashMap<String, Loadable<Vec<SchemaObject>>>,
     pub columns: HashMap<(String, String), Loadable<Vec<Column>>>,
+    /// All objects of all databases loaded at once (for search).
+    pub index: Option<Loadable<()>>,
 }
 
 pub struct LogEntry {
@@ -58,13 +61,18 @@ pub struct ConnEditor {
     pub password: String,
     /// Remove the saved password on save.
     pub forget: bool,
+    /// Filter for the visible-databases checklist.
+    pub db_search: String,
+    /// "Only selected" databases mode (vs all).
+    pub pick_databases: bool,
 }
 
 impl ConnEditor {
     pub fn new(mut cfg: ConnectionConfig, is_new: bool) -> Self {
         // A plain-text password (legacy settings) is moved to the Keychain on save.
         let password = std::mem::take(&mut cfg.password);
-        Self { cfg, is_new, error: None, test: None, password, forget: false }
+        let pick_databases = !cfg.visible_databases.is_empty();
+        Self { cfg, is_new, error: None, test: None, password, forget: false, db_search: String::new(), pick_databases }
     }
 
     /// Config to test with: typed password, else the saved one (resolved off-thread).
@@ -122,6 +130,7 @@ impl DbState {
             Request::Columns { db, object } => {
                 tree.columns.insert((db.clone(), object.clone()), Loadable::Loading);
             }
+            Request::AllObjects => tree.index = Some(Loadable::Loading),
             _ => {}
         }
         self.worker.submit(cfg, timeout, req);
@@ -181,10 +190,7 @@ enum DbAction {
     UseDatabase(String, String),
     NewConsole(String),
     Copy(String),
-}
-
-fn matches(filter: &str, s: &str) -> bool {
-    filter.is_empty() || s.to_lowercase().contains(filter)
+    SetVisible(String, String, bool),
 }
 
 fn kind_icon(k: ObjectKind) -> &'static str {
@@ -217,11 +223,19 @@ impl App {
                 });
                 ui.add(
                     egui::TextEdit::singleline(&mut self.db.filter)
-                        .hint_text(format!("{} Filter databases, tables, views…", icon::FUNNEL))
+                        .hint_text(format!("{} Search: ad|timofeev, db.table", icon::MAGNIFYING_GLASS))
                         .desired_width(f32::INFINITY),
+                )
+                .on_hover_text(
+                    "Case-insensitive search across databases and tables.\n\
+                     • ad|timofeev — databases containing either word (a space works too)\n\
+                     • events — if no database contains it, tables containing \"events\"\n\
+                     • ad.events — tables with \"events\" in databases with \"ad\"\n\
+                     • ad. — databases only   • .events — tables only\n\
+                     Hidden databases are searched too and shown dimmed.",
                 );
                 ui.add_space(4.0);
-                let filter = self.db.filter.to_lowercase();
+                let search = Search::parse(&self.db.filter);
                 let active = self.settings.coding.active_connection.clone();
                 let conns = self.settings.coding.connections.clone();
                 egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
@@ -232,7 +246,7 @@ impl App {
                         }
                     }
                     for cfg in &conns {
-                        self.connection_node(ui, cfg, active.as_deref() == Some(&cfg.id), &filter, &mut actions);
+                        self.connection_node(ui, cfg, active.as_deref() == Some(&cfg.id), &search, &mut actions);
                     }
                 });
             });
@@ -244,7 +258,7 @@ impl App {
         ui: &mut egui::Ui,
         cfg: &ConnectionConfig,
         active: bool,
-        filter: &str,
+        search: &Search,
         actions: &mut Vec<DbAction>,
     ) {
         let p = self.palette;
@@ -261,76 +275,92 @@ impl App {
         }
         let id = cfg.id.clone();
         let current_db = self.db.database_for(cfg);
-        let header = CollapsingHeader::new(title).id_salt(("conn", &cfg.id)).show(ui, |ui| {
-            enum Snap {
-                Load,
-                Loading,
-                Failed(String),
-                Ready(Vec<(String, bool)>),
-            }
-            let tree = self.db.trees.entry(id.clone()).or_default();
-            let snap = match &tree.databases {
-                None => Snap::Load,
-                Some(Loadable::Loading) => Snap::Loading,
-                Some(Loadable::Failed(e)) => Snap::Failed(e.clone()),
-                Some(Loadable::Ready(dbs)) => Snap::Ready(
-                    dbs.iter()
-                        .map(|d| {
-                            let m = match tree.objects.get(d) {
-                                Some(Loadable::Ready(objs)) => objs.iter().any(|o| matches(filter, &o.name)),
-                                _ => false,
-                            };
-                            (d.clone(), m)
-                        })
-                        .collect(),
-                ),
-            };
-            match snap {
-                Snap::Load => actions.push(DbAction::Load(id.clone(), Request::Databases)),
-                Snap::Loading => {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label(dim("connecting…", &p));
-                    });
+        let header = CollapsingHeader::new(title)
+            .id_salt(("conn", &cfg.id, !search.is_empty()))
+            .open(if search.is_empty() { None } else { Some(true) })
+            .show(ui, |ui| {
+                enum Snap {
+                    Load,
+                    Loading,
+                    Failed(String),
+                    Ready(Vec<String>),
                 }
-                Snap::Failed(e) => {
-                    ui.label(RichText::new(e).color(p.error).small());
-                    if ui.small_button("Retry").clicked() {
-                        actions.push(DbAction::Refresh(id.clone()));
-                    }
-                }
-                Snap::Ready(dbs) => {
-                    for (dbname, objects_match) in dbs {
-                        if !matches(filter, &dbname) && !objects_match {
-                            continue;
-                        }
-                        let filter_objects = if matches(filter, &dbname) { "" } else { filter };
-                        let mut label = RichText::new(format!("{} {dbname}", icon::STACK));
-                        if dbname == current_db {
-                            label = label.strong();
-                        }
-                        let r = CollapsingHeader::new(label)
-                            .id_salt(("db", &id, &dbname))
-                            .open(if filter_objects.is_empty() { None } else { Some(true) })
-                            .show(ui, |ui| self.database_node(ui, &id, &dbname, filter_objects, actions));
-                        r.header_response.context_menu(|ui| {
-                            if ui.button("Use for queries").clicked() {
-                                actions.push(DbAction::UseDatabase(id.clone(), dbname.clone()));
-                            }
-                            if ui.button("Show database DDL").clicked() {
-                                actions.push(DbAction::DatabaseDdl(id.clone(), dbname.clone()));
-                            }
-                            if ui.button("Refresh").clicked() {
-                                actions.push(DbAction::Load(id.clone(), Request::Objects { db: dbname.clone() }));
-                            }
-                            if ui.button("Copy name").clicked() {
-                                actions.push(DbAction::Copy(dbname.clone()));
-                            }
+                let tree = self.db.trees.entry(id.clone()).or_default();
+                let snap = match &tree.databases {
+                    None => Snap::Load,
+                    Some(Loadable::Loading) => Snap::Loading,
+                    Some(Loadable::Failed(e)) => Snap::Failed(e.clone()),
+                    Some(Loadable::Ready(dbs)) => Snap::Ready(dbs.clone()),
+                };
+                match snap {
+                    Snap::Load => actions.push(DbAction::Load(id.clone(), Request::Databases)),
+                    Snap::Loading => {
+                        ui.horizontal(|ui| {
+                            ui.spinner();
+                            ui.label(dim("connecting…", &p));
                         });
                     }
+                    Snap::Failed(e) => {
+                        ui.label(RichText::new(e).color(p.error).small());
+                        if ui.small_button("Retry").clicked() {
+                            actions.push(DbAction::Refresh(id.clone()));
+                        }
+                    }
+                    Snap::Ready(dbs) => {
+                        let resolved = search.resolve(&dbs);
+                        let search = &resolved;
+                        // Searching for tables: index every object once, in one query.
+                        if !search.is_empty() && search.wants_objects() && tree.index.is_none() {
+                            actions.push(DbAction::Load(id.clone(), Request::AllObjects));
+                        }
+                        if matches!(tree.index, Some(Loadable::Loading)) {
+                            ui.horizontal(|ui| {
+                                ui.spinner();
+                                ui.label(dim("indexing tables…", &p).small());
+                            });
+                        }
+                        let visible: Vec<&String> = dbs
+                            .iter()
+                            .filter(|d| cfg.visible_databases.is_empty() || cfg.visible_databases.contains(d))
+                            .collect();
+                        if !cfg.visible_databases.is_empty() && search.is_empty() {
+                            let r = ui.add(
+                                egui::Label::new(
+                                    dim(format!("showing {} of {} databases", visible.len(), dbs.len()), &p).small(),
+                                )
+                                .sense(egui::Sense::click()),
+                            );
+                            if r.on_hover_text("Choose databases in Edit…").clicked() {
+                                actions.push(DbAction::Edit(id.clone()));
+                            }
+                        }
+                        let mut shown = 0;
+                        for dbname in &visible {
+                            if self.database_row(ui, cfg, dbname, &current_db, search, false, actions) {
+                                shown += 1;
+                            }
+                        }
+                        if !search.is_empty() {
+                            // Hidden databases are still searchable, shown dimmed below.
+                            let hidden: Vec<&String> = dbs.iter().filter(|d| !visible.contains(d)).collect();
+                            let mut first = true;
+                            for dbname in hidden {
+                                if self.would_show(cfg, dbname, search) {
+                                    if first {
+                                        ui.label(dim(format!("{} hidden", icon::EYE_SLASH), &p).small());
+                                        first = false;
+                                    }
+                                    self.database_row(ui, cfg, dbname, &current_db, search, true, actions);
+                                    shown += 1;
+                                }
+                            }
+                            if shown == 0 {
+                                ui.label(dim("no matches", &p).small());
+                            }
+                        }
+                    }
                 }
-            }
-        });
+            });
         let hr = header.header_response;
         ui.painter().circle_filled(egui::pos2(ui.max_rect().right() - 6.0, hr.rect.center().y), 3.5, dot);
         if hr.double_clicked() {
@@ -347,7 +377,7 @@ impl App {
                 if ui.button("Refresh").clicked() {
                     actions.push(DbAction::Refresh(cfg.id.clone()));
                 }
-                if ui.button("Edit…").clicked() {
+                if ui.button("Edit… (connection, visible databases)").clicked() {
                     actions.push(DbAction::Edit(cfg.id.clone()));
                 }
                 ui.separator();
@@ -358,12 +388,79 @@ impl App {
         );
     }
 
+    /// Whether `db` has something to show for the current search.
+    fn would_show(&self, cfg: &ConnectionConfig, db: &str, search: &Search) -> bool {
+        if search.is_empty() || search.db_matches(db) {
+            return true;
+        }
+        let f = search.objects(db);
+        match self.db.trees.get(&cfg.id).and_then(|t| t.objects.get(db)) {
+            Some(Loadable::Ready(objs)) => objs.iter().any(|o| f.matches(&o.name)),
+            _ => false,
+        }
+    }
+
+    /// One database row; returns whether it was shown.
+    #[allow(clippy::too_many_arguments)]
+    fn database_row(
+        &mut self,
+        ui: &mut egui::Ui,
+        cfg: &ConnectionConfig,
+        dbname: &str,
+        current_db: &str,
+        search: &Search,
+        hidden: bool,
+        actions: &mut Vec<DbAction>,
+    ) -> bool {
+        let p = self.palette;
+        if !self.would_show(cfg, dbname, search) {
+            return false;
+        }
+        let id = &cfg.id;
+        let filter = if search.db_matches(dbname) { ObjectFilter::All } else { search.objects(dbname) };
+        let mut label = RichText::new(format!("{} {dbname}", icon::STACK));
+        if dbname == current_db {
+            label = label.strong();
+        }
+        if hidden {
+            label = label.color(p.text_dim);
+        }
+        let narrowing = filter != ObjectFilter::All;
+        let r = CollapsingHeader::new(label)
+            .id_salt(("db", id, dbname, !search.is_empty()))
+            .open(if narrowing { Some(true) } else { None })
+            .show(ui, |ui| self.database_node(ui, id, dbname, &filter, actions));
+        r.header_response.context_menu(|ui| {
+            if ui.button("Use for queries").clicked() {
+                actions.push(DbAction::UseDatabase(id.clone(), dbname.to_owned()));
+            }
+            if ui.button("Show database DDL").clicked() {
+                actions.push(DbAction::DatabaseDdl(id.clone(), dbname.to_owned()));
+            }
+            if ui.button("Refresh").clicked() {
+                actions.push(DbAction::Load(id.clone(), Request::Objects { db: dbname.to_owned() }));
+            }
+            if ui.button("Copy name").clicked() {
+                actions.push(DbAction::Copy(dbname.to_owned()));
+            }
+            ui.separator();
+            if hidden {
+                if ui.button("Show in tree").clicked() {
+                    actions.push(DbAction::SetVisible(id.clone(), dbname.to_owned(), true));
+                }
+            } else if ui.button("Hide from tree").clicked() {
+                actions.push(DbAction::SetVisible(id.clone(), dbname.to_owned(), false));
+            }
+        });
+        true
+    }
+
     fn database_node(
         &mut self,
         ui: &mut egui::Ui,
         conn: &str,
         dbname: &str,
-        filter: &str,
+        filter: &ObjectFilter,
         actions: &mut Vec<DbAction>,
     ) {
         let p = self.palette;
@@ -386,15 +483,17 @@ impl App {
         if objs.is_empty() {
             ui.label(dim("no objects", &p).small());
         }
+        let narrowing = *filter != ObjectFilter::All;
         for kind in ObjectKind::GROUPS {
             let group: Vec<&SchemaObject> =
-                objs.iter().filter(|o| o.kind == *kind && matches(filter, &o.name)).collect();
+                objs.iter().filter(|o| o.kind == *kind && filter.matches(&o.name)).collect();
             if group.is_empty() {
                 continue;
             }
             CollapsingHeader::new(dim(format!("{} ({})", kind.group_name(), group.len()), &p))
-                .id_salt(("grp", conn, dbname, kind.group_name()))
-                .default_open(*kind == ObjectKind::Table || !filter.is_empty())
+                .id_salt(("grp", conn, dbname, kind.group_name(), narrowing))
+                .open(if narrowing { Some(true) } else { None })
+                .default_open(*kind == ObjectKind::Table)
                 .show(ui, |ui| {
                     for obj in group {
                         self.object_node(ui, conn, dbname, obj, actions);
@@ -523,6 +622,22 @@ impl App {
                     self.new_scratch(&dir, "sql");
                 }
                 DbAction::Copy(text) => self.copy_to_clipboard(text),
+                DbAction::SetVisible(id, dbname, show) => {
+                    let all = match self.db.trees.get(&id).and_then(|t| t.databases.as_ref()) {
+                        Some(Loadable::Ready(d)) => d.clone(),
+                        _ => Vec::new(),
+                    };
+                    if let Some(c) = self.settings.coding.connections.iter_mut().find(|c| c.id == id) {
+                        if c.visible_databases.is_empty() {
+                            c.visible_databases = all;
+                        }
+                        c.visible_databases.retain(|d| d != &dbname);
+                        if show {
+                            c.visible_databases.push(dbname);
+                            c.visible_databases.sort();
+                        }
+                    }
+                }
             }
         }
     }
@@ -578,6 +693,20 @@ impl App {
                     },
                 );
             }
+            (Request::AllObjects, r) => match r {
+                Ok(Payload::AllObjects(all)) => {
+                    let mut by_db: HashMap<String, Vec<SchemaObject>> = HashMap::new();
+                    for (d, o) in all {
+                        by_db.entry(d).or_default().push(o);
+                    }
+                    for (d, objs) in by_db {
+                        tree.objects.insert(d, Loadable::Ready(objs));
+                    }
+                    tree.index = Some(Loadable::Ready(()));
+                }
+                Ok(_) => tree.index = Some(Loadable::Failed("unexpected".into())),
+                Err(e) => tree.index = Some(Loadable::Failed(e)),
+            },
             (Request::Columns { db, object }, r) => {
                 tree.columns.insert(
                     (db, object),
@@ -629,7 +758,13 @@ impl App {
     }
 
     pub fn connection_editor(&mut self, ctx: &egui::Context) {
-        let Some(ed) = &mut self.db.editing else { return };
+        let mut load_dbs = false;
+        let DbState { editing, trees, .. } = &mut self.db;
+        let Some(ed) = editing else { return };
+        let known_dbs: Option<Vec<String>> = match trees.get(&ed.cfg.id).and_then(|t| t.databases.as_ref()) {
+            Some(Loadable::Ready(d)) => Some(d.clone()),
+            _ => None,
+        };
         let p = self.palette;
         let mut save = false;
         let mut cancel = false;
@@ -697,6 +832,8 @@ impl App {
                 }
                 None => {}
             }
+            ui.add_space(6.0);
+            visible_databases_ui(ui, ed, known_dbs.as_deref(), &mut load_dbs, &p);
             if let Some(e) = &ed.error {
                 ui.label(RichText::new(e).color(p.error));
             }
@@ -715,6 +852,12 @@ impl App {
                 });
             });
         });
+        if load_dbs && !ed.is_new {
+            let id = ed.cfg.id.clone();
+            self.db_request(&id, Request::Databases);
+            return;
+        }
+        let Some(ed) = &mut self.db.editing else { return };
         if test {
             let cfg = ed.test_config();
             ed.test = Some(Loadable::Loading);
@@ -781,4 +924,70 @@ impl DbState {
             None => Err(()),
         }
     }
+}
+
+/// "Databases in tree": all, or a hand-picked list with a searchable checklist.
+fn visible_databases_ui(
+    ui: &mut egui::Ui,
+    ed: &mut ConnEditor,
+    known: Option<&[String]>,
+    load: &mut bool,
+    p: &crate::theme::Palette,
+) {
+    ui.label(RichText::new("Databases in tree").strong());
+    ui.horizontal(|ui| {
+        if ui.radio(!ed.pick_databases, "All").clicked() {
+            ed.cfg.visible_databases.clear();
+            ed.pick_databases = false;
+        }
+        if ui.radio(ed.pick_databases, "Only selected").clicked() {
+            ed.pick_databases = true;
+        }
+        if ed.pick_databases {
+            let n = ed.cfg.visible_databases.len();
+            let text = if n == 0 { "none selected = all".to_owned() } else { format!("{n} selected") };
+            ui.label(dim(text, p).small());
+        }
+    });
+    if !ed.pick_databases {
+        return;
+    }
+    let Some(known) = known else {
+        if ed.is_new {
+            ui.label(dim("Save the connection first, then pick databases here.", p).small());
+        } else if ui.button("Load database list").clicked() {
+            *load = true;
+        }
+        return;
+    };
+    ui.horizontal(|ui| {
+        ui.add(egui::TextEdit::singleline(&mut ed.db_search).hint_text("filter: ad|timofeev").desired_width(220.0));
+        let search = Search::parse(&ed.db_search);
+        let matching: Vec<&String> = known.iter().filter(|d| search.is_empty() || search.db_matches(d)).collect();
+        if ui.small_button(format!("Select {}", matching.len())).on_hover_text("Select all matching").clicked() {
+            for d in &matching {
+                if !ed.cfg.visible_databases.contains(d) {
+                    ed.cfg.visible_databases.push((*d).clone());
+                }
+            }
+            ed.cfg.visible_databases.sort();
+        }
+        if ui.small_button("Clear").clicked() {
+            ed.cfg.visible_databases.clear();
+        }
+    });
+    let search = Search::parse(&ed.db_search);
+    egui::ScrollArea::vertical().max_height(180.0).auto_shrink([false, true]).show(ui, |ui| {
+        for d in known.iter().filter(|d| search.is_empty() || search.db_matches(d)) {
+            let mut on = ed.cfg.visible_databases.contains(d);
+            if ui.checkbox(&mut on, d.as_str()).changed() {
+                if on {
+                    ed.cfg.visible_databases.push(d.clone());
+                    ed.cfg.visible_databases.sort();
+                } else {
+                    ed.cfg.visible_databases.retain(|x| x != d);
+                }
+            }
+        }
+    });
 }

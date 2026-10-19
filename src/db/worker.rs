@@ -8,6 +8,7 @@ use std::time::Duration;
 pub enum Request {
     Databases,
     Objects { db: String },
+    AllObjects,
     Columns { db: String, object: String },
     ObjectDdl { db: String, object: SchemaObject },
     DatabaseDdl { db: String },
@@ -20,6 +21,7 @@ impl Request {
         match self {
             Request::Databases => "list databases".into(),
             Request::Objects { db } => format!("list objects in {db}"),
+            Request::AllObjects => "index all objects".into(),
             Request::Columns { db, object } => format!("columns of {db}.{object}"),
             Request::ObjectDdl { db, object } => format!("DDL of {db}.{}", object.name),
             Request::DatabaseDdl { db } => format!("DDL of database {db}"),
@@ -40,6 +42,7 @@ impl Request {
 pub enum Payload {
     Databases(Vec<String>),
     Objects(Vec<SchemaObject>),
+    AllObjects(Vec<(String, SchemaObject)>),
     Columns(Vec<Column>),
     Ddl(String),
     Query(QueryResult),
@@ -83,6 +86,7 @@ impl Worker {
             let result = match &request {
                 Request::Databases => driver.databases(&mut log).map(Payload::Databases),
                 Request::Objects { db } => driver.objects(db, &mut log).map(Payload::Objects),
+                Request::AllObjects => driver.all_objects(&mut log).map(Payload::AllObjects),
                 Request::Columns { db, object } => driver.columns(db, object, &mut log).map(Payload::Columns),
                 Request::ObjectDdl { db, object } => driver.object_ddl(db, object, &mut log).map(Payload::Ddl),
                 Request::DatabaseDdl { db } => driver.database_ddl(db, &mut log).map(Payload::Ddl),

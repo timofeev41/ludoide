@@ -74,6 +74,7 @@ pub struct App {
     saved_session: Option<Session>,
     pub pending_copy: Option<String>,
     pub find: Option<crate::ui::find::FindState>,
+    pub compile: Option<crate::ui::dbt_compile::CompileDialog>,
     pub toast_text: Option<String>,
 }
 
@@ -109,6 +110,7 @@ impl App {
             saved_session: None,
             pending_copy: None,
             find: None,
+            compile: None,
             toast_text: None,
         };
         app.migrate_passwords();
@@ -250,13 +252,19 @@ impl App {
         }
     }
 
-    pub fn launch_claude(&mut self, prompt: Option<String>, ctx: &egui::Context) {
+    /// Start Claude Code in a terminal; `cwd` defaults to the current project root.
+    pub fn launch_claude(&mut self, prompt: Option<String>, cwd: Option<PathBuf>, ctx: &egui::Context) {
         let mut cmd = self.settings.other.claude_command.clone();
         if let Some(p) = prompt {
             cmd.push_str(&format!(" '{}'", p.replace('\'', "'\\''")));
         }
+        let cwd = cwd.or_else(|| self.context_dir());
+        let name = match cwd.as_ref().and_then(|d| d.file_name()) {
+            Some(n) => format!("Claude · {}", n.to_string_lossy()),
+            None => "Claude".into(),
+        };
         let shell = PathBuf::from(&self.settings.terminal.shell);
-        self.new_terminal(Some("Claude".into()), Some((shell, vec!["-lic".into(), cmd])), None, ctx);
+        self.new_terminal(Some(name), Some((shell, vec!["-lic".into(), cmd])), cwd, ctx);
     }
 
     /// Run the current document: SQL against the DB, Python in a terminal.
@@ -377,7 +385,7 @@ impl App {
                 .terms
                 .sessions
                 .iter()
-                .filter(|t| t.exited.is_none() && !t.name.starts_with('▶') && t.name != "Claude")
+                .filter(|t| t.exited.is_none() && !t.name.starts_with('▶') && !t.name.starts_with("Claude"))
                 .map(|t| t.name.clone())
                 .collect(),
         }

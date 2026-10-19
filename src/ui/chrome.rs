@@ -54,7 +54,7 @@ impl App {
                 }
                 if icon_button(ui, icon::SPARKLE, "Claude Code (opens a terminal in the project)", false, &p).clicked()
                 {
-                    self.launch_claude(None, &ui.ctx().clone());
+                    self.launch_claude(None, None, &ui.ctx().clone());
                 }
                 ui.with_layout(Layout::bottom_up(Align::Center), |ui| {
                     if icon_button(ui, icon::GEAR_SIX, "Settings (⌘,)", self.settings_open, &p).clicked() {
@@ -198,6 +198,7 @@ impl App {
     pub fn dialogs(&mut self, ctx: &egui::Context) {
         self.file_dialog_ui(ctx);
         self.connection_editor(ctx);
+        self.compile_dialog_ui(ctx);
         let Some(confirm) = &self.confirm else { return };
         let p = self.palette;
         let (title, body) = match confirm {

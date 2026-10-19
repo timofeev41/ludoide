@@ -176,6 +176,15 @@ impl App {
             ui.label("Max result rows");
             ui.add(egui::DragValue::new(&mut self.settings.coding.max_result_rows).range(1..=1_000_000));
             ui.end_row();
+            ui.label("Copy results as");
+            egui::ComboBox::from_id_salt("copy_format")
+                .selected_text(self.settings.coding.copy_format.label())
+                .show_ui(ui, |ui| {
+                    for f in crate::db::export::CopyFormat::ALL {
+                        ui.selectable_value(&mut self.settings.coding.copy_format, f, f.label());
+                    }
+                });
+            ui.end_row();
             ui.label("Query timeout");
             ui.add(egui::DragValue::new(&mut self.settings.coding.query_timeout_secs).range(1..=86_400).suffix(" s"));
             ui.end_row();

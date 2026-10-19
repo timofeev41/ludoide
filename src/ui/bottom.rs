@@ -2,7 +2,7 @@
 
 use super::{dim, panel_frame, small_icon_button};
 use crate::app::App;
-use crate::db;
+use crate::db::{self, export, export::CopyFormat};
 use crate::fonts::icon;
 use crate::lint::Severity;
 use crate::terminal::{self, TerminalSession};
@@ -161,6 +161,7 @@ impl App {
         let p = self.palette;
         let mut cancel = false;
         let mut copy: Option<String> = None;
+        let default_format = self.settings.coding.copy_format;
         egui::Frame::new().inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
             ui.horizontal(|ui| {
                 if let Some(run) = &self.db.running {
@@ -198,13 +199,26 @@ impl App {
                         );
                         ui.label(dim(format!("on {}", res.conn), &p).small());
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if !q.rows.is_empty() && ui.small_button(format!("{} Copy TSV", icon::COPY)).clicked() {
-                                let mut out = q.columns.iter().map(|c| c.0.as_str()).collect::<Vec<_>>().join("\t");
-                                for r in &q.rows {
-                                    out.push('\n');
-                                    out.push_str(&r.join("\t"));
+                            if !q.rows.is_empty() {
+                                // Split button: copy in the default format, or pick another.
+                                let table = export::table_from_sql(&res.sql);
+                                ui.menu_button(icon::CARET_DOWN, |ui| {
+                                    for f in CopyFormat::ALL {
+                                        let mut text = f.label().to_owned();
+                                        if f == default_format {
+                                            text.push_str("  (default)");
+                                        }
+                                        if ui.button(text).clicked() {
+                                            copy = Some(export::export(q, f, &table));
+                                            ui.close();
+                                        }
+                                    }
+                                });
+                                let label = format!("{} Copy {}", icon::COPY, default_format.label());
+                                if ui.small_button(label).on_hover_text("Default format: Settings → Coding").clicked()
+                                {
+                                    copy = Some(export::export(q, default_format, &table));
                                 }
-                                copy = Some(out);
                             }
                         });
                     }
@@ -222,6 +236,7 @@ impl App {
         }
         if let Some(text) = copy {
             self.copy_to_clipboard(text);
+            self.notify("Results copied to clipboard");
         }
         let Some(res) = &self.db.result else { return };
         match &res.outcome {
@@ -260,16 +275,14 @@ impl App {
                     }
                     table
                         .auto_shrink([false, false])
-                        .header(row_h + 8.0, |mut header| {
+                        .header(row_h + 2.0, |mut header| {
                             header.col(|ui| {
                                 ui.label(dim("#", &p));
                             });
                             for (name, ty) in &q.columns {
                                 header.col(|ui| {
-                                    ui.vertical(|ui| {
-                                        ui.label(RichText::new(name).strong());
-                                        ui.label(dim(ty, &p).small());
-                                    });
+                                    ui.add(egui::Label::new(RichText::new(name).strong()).sense(egui::Sense::hover()))
+                                        .on_hover_text(RichText::new(ty).monospace());
                                 });
                             }
                         })

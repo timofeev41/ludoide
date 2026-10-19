@@ -75,6 +75,20 @@ pub fn highlight(text: &str, lang: &Language, font: FontId, p: &Palette) -> Layo
             i += n;
             continue;
         }
+        // Jinja (dbt): {{ expr }}, {% stmt %}, {# comment #}
+        if lang.id == LangId::Sql && (rest.starts_with("{{") || rest.starts_with("{%") || rest.starts_with("{#")) {
+            let close = match &rest[..2] {
+                "{{" => "}}",
+                "{%" => "%}",
+                _ => "#}",
+            };
+            let n = rest[2..].find(close).map_or(rest.len(), |e| e + 4);
+            let tok = if close == "#}" { Tok::Comment } else { Tok::Key };
+            push(&mut job, &rest[..n], tok);
+            i += n;
+            line_start = false;
+            continue;
+        }
         // Comments
         if rest.starts_with(comment) || (lang.id == LangId::Sql && rest.starts_with("/*")) {
             let n = if rest.starts_with("/*") {

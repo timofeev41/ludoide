@@ -3,6 +3,8 @@
 //! variant and a module implementing [`Driver`].
 
 pub mod clickhouse;
+pub mod export;
+pub mod search;
 pub mod worker;
 
 use serde::{Deserialize, Serialize};
@@ -65,6 +67,9 @@ pub struct ConnectionConfig {
     pub keychain_password: bool,
     /// Default database; empty = server default.
     pub database: String,
+    /// Databases shown in the tree; empty = all.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub visible_databases: Vec<String>,
 }
 
 impl Default for ConnectionConfig {
@@ -79,6 +84,7 @@ impl Default for ConnectionConfig {
             password: String::new(),
             keychain_password: false,
             database: String::new(),
+            visible_databases: Vec::new(),
         }
     }
 }
@@ -198,6 +204,8 @@ pub trait Driver: Send + Sync {
     fn ping(&self, log: &mut DebugLog) -> Result<String, String>;
     fn databases(&self, log: &mut DebugLog) -> Result<Vec<String>, String>;
     fn objects(&self, db: &str, log: &mut DebugLog) -> Result<Vec<SchemaObject>, String>;
+    /// Objects of every database in one round trip, as `(database, object)` (used by search).
+    fn all_objects(&self, log: &mut DebugLog) -> Result<Vec<(String, SchemaObject)>, String>;
     fn columns(&self, db: &str, object: &str, log: &mut DebugLog) -> Result<Vec<Column>, String>;
     /// `CREATE ...` statement for one object.
     fn object_ddl(&self, db: &str, obj: &SchemaObject, log: &mut DebugLog) -> Result<String, String>;
