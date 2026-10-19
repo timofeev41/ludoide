@@ -8,7 +8,7 @@ on:
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Attach the macOS app to this existing release tag (optional)"
+        description: "Release tag to publish the macOS app to, e.g. v0.0.3 (created on the run's commit if new; optional)"
         required: false
         default: ""
 
@@ -31,7 +31,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          ref: ${{ env.RELEASE_TAG || github.ref }}
+          # Releases build their tag; manual runs build the branch they were started on.
+          ref: ${{ github.event.release.tag_name || github.ref }}
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: aarch64-apple-darwin,x86_64-apple-darwin
@@ -50,7 +51,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # A pushed tag has no release yet: create it, with notes generated from the commits.
+          # No release yet (pushed tag or manual run): create it — and the tag, on the
+          # commit just built — with notes generated from the commits.
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
-            || gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "$RELEASE_TAG" --generate-notes --verify-tag
+            || gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "$RELEASE_TAG" \
+                 --generate-notes --target "$(git rev-parse HEAD)"
           gh release upload "$RELEASE_TAG" dist/*.zip --clobber --repo "$GITHUB_REPOSITORY"
