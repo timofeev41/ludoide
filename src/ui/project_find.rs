@@ -50,14 +50,13 @@ impl App {
             });
         });
         let st = &mut self.project_find;
+        // Right to left: "Aa" first, then the box takes exactly the width that is left
+        // (a fixed guess at the button's width made the panel grow every frame).
+        let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y + 4.0);
         let r = ui
-            .horizontal(|ui| {
-                let w = ui.available_width() - 34.0;
-                let r = ui.allocate_ui(egui::vec2(w, ui.spacing().interact_size.y), |ui| {
-                    search_field(ui, &mut st.query.text, &format!("{} Text or file name", icon::MAGNIFYING_GLASS), &p)
-                });
+            .allocate_ui_with_layout(row, egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 ui.toggle_value(&mut st.query.case_sensitive, "Aa").on_hover_text("Match case");
-                r.inner
+                search_field(ui, &mut st.query.text, &format!("{} Text or file name", icon::MAGNIFYING_GLASS), &p)
             })
             .inner;
         if std::mem::take(&mut st.focus) {
