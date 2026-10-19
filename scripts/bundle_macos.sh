@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
 # Build Ludo.app (universal arm64 + x86_64) into dist/.
 # Usage: scripts/bundle_macos.sh [--native]   (--native: only the host architecture)
+# LUDO_VERSION overrides the version from Cargo.toml (CI sets it from the release tag).
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-VERSION=$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)
+VERSION=${LUDO_VERSION:-$(grep -m1 '^version' Cargo.toml | cut -d'"' -f2)}
+VERSION=${VERSION#v}
 APP=dist/Ludo.app
 rm -rf "$APP" && mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
