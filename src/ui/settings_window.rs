@@ -158,7 +158,7 @@ impl App {
         }
         if let Some(cfg) = edit {
             let is_new = !self.settings.coding.connections.iter().any(|c| c.id == cfg.id);
-            self.db.editing = Some(ConnEditor { cfg, is_new, error: None, test: None });
+            self.db.editing = Some(ConnEditor::new(cfg, is_new));
         }
         ui.add_space(16.0);
 

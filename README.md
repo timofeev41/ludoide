@@ -9,6 +9,8 @@ It's built for ClickHouse work, benthos/dbt YAML, SQL scratches and the odd Airf
 
 **Databases (right panel)**
 - ClickHouse over HTTP(S). Add several connections; a URL + user pair can only exist once.
+- Passwords are stored in the **macOS Keychain** (service "Ludo database connection"), never in `settings.json`.
+  Passwords from older settings files move there automatically on first launch.
 - Browse databases → tables / views / materialized views / dictionaries / skip indices → columns,
   with a filter box. Row counts and sizes show on hover.
 - **Quick inspect**: double-click a table (or use the context menu) to run `SELECT * … LIMIT 500`.
@@ -95,7 +97,8 @@ The panel, results grid, log, linting and connection editor work unchanged, beca
 ## Development
 
 ```sh
-cargo test                                               # unit tests
+cargo test                                               # unit tests (on Linux: `keyctl session - cargo test`
+                                                         # to exercise the kernel keyring instead of skipping)
 LUDO_CH_URL=http://localhost:8123 cargo test -- --ignored # live ClickHouse test
 ```
 
@@ -114,7 +117,8 @@ CREATE VIEW analytics.v_buys AS SELECT * FROM analytics.events WHERE event = 'bu
 
 ## Known limitations (v0.1)
 
-- Connection passwords are stored in plain text in `settings.json` (the macOS Keychain is planned).
+- The app is ad-hoc signed, so after installing a new build macOS asks once more for Keychain access
+  (choose *Always Allow*).
 - The terminal has no mouse text selection yet (paste with `⌘V` works).
 - There's no autocomplete yet. SQL lint warnings are advisory.
 - Text doesn't wrap in the editor, and very large files (more than ~5 MB) will feel slower.

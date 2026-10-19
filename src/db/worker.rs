@@ -74,8 +74,12 @@ impl Worker {
         let cfg = cfg.clone();
         std::thread::spawn(move || {
             let started = std::time::Instant::now();
-            let driver = cfg.kind.connect(&cfg, timeout);
             let mut log = DebugLog::new();
+            let cfg = cfg.with_secret().unwrap_or_else(|e| {
+                log.push(e);
+                cfg.clone()
+            });
+            let driver = cfg.kind.connect(&cfg, timeout);
             let result = match &request {
                 Request::Databases => driver.databases(&mut log).map(Payload::Databases),
                 Request::Objects { db } => driver.objects(db, &mut log).map(Payload::Objects),

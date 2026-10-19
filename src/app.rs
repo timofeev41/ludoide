@@ -111,6 +111,7 @@ impl App {
             find: None,
             toast_text: None,
         };
+        app.migrate_passwords();
         if app.settings.other.restore_session {
             let session = Session::load();
             app.workspace.roots = session.roots.into_iter().filter(|p| p.is_dir()).collect();
@@ -130,6 +131,30 @@ impl App {
             }
         }
         app
+    }
+
+    /// Move plain-text passwords (older settings files) into the Keychain. The
+    /// settings file is rewritten without them on the next persist.
+    fn migrate_passwords(&mut self) {
+        let mut failed = Vec::new();
+        for c in &mut self.settings.coding.connections {
+            if c.password.is_empty() {
+                continue;
+            }
+            match crate::secrets::set(&c.id, &c.password) {
+                Ok(()) => {
+                    c.password.clear();
+                    c.keychain_password = true;
+                }
+                Err(e) => failed.push(format!("{}: {e}", c.display_name())),
+            }
+        }
+        if !failed.is_empty() {
+            self.error(format!(
+                "Some passwords could not be moved to the Keychain and stay in settings.json — {}",
+                failed.join("; ")
+            ));
+        }
     }
 
     // ----- helpers used by the panels -----

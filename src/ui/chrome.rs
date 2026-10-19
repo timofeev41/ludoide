@@ -271,6 +271,9 @@ impl App {
                 }
             }
             Confirm::DeleteConnection(id) => {
+                if let Err(e) = crate::secrets::delete(&id) {
+                    self.error(format!("Couldn't remove the saved password from the Keychain: {e}"));
+                }
                 self.settings.coding.connections.retain(|c| c.id != id);
                 if self.settings.coding.active_connection.as_deref() == Some(&id) {
                     self.settings.coding.active_connection =

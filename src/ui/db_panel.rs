@@ -7,6 +7,7 @@ use crate::db::{self, Column, ConnectionConfig, DriverKind, ObjectKind, QueryRes
 use crate::editor::Document;
 use crate::fonts::icon;
 use crate::languages::LangId;
+use crate::secrets;
 use egui::{CollapsingHeader, RichText};
 use std::collections::{HashMap, VecDeque};
 use std::time::{Duration, Instant};
@@ -53,6 +54,28 @@ pub struct ConnEditor {
     pub is_new: bool,
     pub error: Option<String>,
     pub test: Option<Loadable<String>>,
+    /// Newly typed password; empty keeps the one in the Keychain.
+    pub password: String,
+    /// Remove the saved password on save.
+    pub forget: bool,
+}
+
+impl ConnEditor {
+    pub fn new(mut cfg: ConnectionConfig, is_new: bool) -> Self {
+        // A plain-text password (legacy settings) is moved to the Keychain on save.
+        let password = std::mem::take(&mut cfg.password);
+        Self { cfg, is_new, error: None, test: None, password, forget: false }
+    }
+
+    /// Config to test with: typed password, else the saved one (resolved off-thread).
+    fn test_config(&self) -> ConnectionConfig {
+        let mut cfg = self.cfg.clone();
+        cfg.password = self.password.clone();
+        if self.forget {
+            cfg.keychain_password = false;
+        }
+        cfg
+    }
 }
 
 pub struct DbState {
@@ -188,12 +211,7 @@ impl App {
                     section_header(ui, "Databases", &p);
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if small_icon_button(ui, icon::PLUS, "Add connection", &p).clicked() {
-                            self.db.editing = Some(ConnEditor {
-                                cfg: ConnectionConfig::default(),
-                                is_new: true,
-                                error: None,
-                                test: None,
-                            });
+                            self.db.editing = Some(ConnEditor::new(ConnectionConfig::default(), true));
                         }
                     });
                 });
@@ -210,12 +228,7 @@ impl App {
                     if conns.is_empty() {
                         ui.label(dim("No connections yet.", &p));
                         if ui.button(format!("{} Add ClickHouse connection", icon::PLUS)).clicked() {
-                            self.db.editing = Some(ConnEditor {
-                                cfg: ConnectionConfig::default(),
-                                is_new: true,
-                                error: None,
-                                test: None,
-                            });
+                            self.db.editing = Some(ConnEditor::new(ConnectionConfig::default(), true));
                         }
                     }
                     for cfg in &conns {
@@ -476,7 +489,7 @@ impl App {
                 DbAction::Activate(id) => self.settings.coding.active_connection = Some(id),
                 DbAction::Edit(id) => {
                     if let Some(cfg) = self.connection(&id).cloned() {
-                        self.db.editing = Some(ConnEditor { cfg, is_new: false, error: None, test: None });
+                        self.db.editing = Some(ConnEditor::new(cfg, false));
                     }
                 }
                 DbAction::Delete(id) => self.confirm = Some(Confirm::DeleteConnection(id)),
@@ -647,7 +660,22 @@ impl App {
                 ui.add(egui::TextEdit::singleline(&mut ed.cfg.username).desired_width(300.0));
                 ui.end_row();
                 ui.label("Password");
-                ui.add(egui::TextEdit::singleline(&mut ed.cfg.password).password(true).desired_width(300.0));
+                let saved = ed.cfg.keychain_password && !ed.forget;
+                ui.horizontal(|ui| {
+                    let hint = if saved { "saved in Keychain — type to replace" } else { "" };
+                    let w = if saved { 228.0 } else { 300.0 };
+                    ui.add(
+                        egui::TextEdit::singleline(&mut ed.password).password(true).hint_text(hint).desired_width(w),
+                    );
+                    if saved
+                        && ui
+                            .small_button("Forget")
+                            .on_hover_text("Remove the saved password from the Keychain")
+                            .clicked()
+                    {
+                        ed.forget = true;
+                    }
+                });
                 ui.end_row();
                 ui.label("Database");
                 ui.add(egui::TextEdit::singleline(&mut ed.cfg.database).hint_text("default").desired_width(300.0));
@@ -688,7 +716,7 @@ impl App {
             });
         });
         if test {
-            let cfg = ed.cfg.clone();
+            let cfg = ed.test_config();
             ed.test = Some(Loadable::Loading);
             self.db.test_connection(cfg, Duration::from_secs(10), ctx.clone());
         }
@@ -706,8 +734,22 @@ impl App {
                 ed.error = Some(e);
                 return;
             }
-            let ed = self.db.editing.take().unwrap();
+            // Store the secret first so a Keychain failure leaves the dialog open.
             let id = ed.cfg.id.clone();
+            if !ed.password.is_empty() {
+                if let Err(e) = secrets::set(&id, &ed.password) {
+                    ed.error = Some(format!("Couldn't save the password to the Keychain: {e}"));
+                    return;
+                }
+                ed.cfg.keychain_password = true;
+            } else if ed.forget {
+                if let Err(e) = secrets::delete(&id) {
+                    ed.error = Some(format!("Couldn't remove the password from the Keychain: {e}"));
+                    return;
+                }
+                ed.cfg.keychain_password = false;
+            }
+            let ed = self.db.editing.take().unwrap();
             match self.settings.coding.connections.iter_mut().find(|c| c.id == id) {
                 Some(existing) => *existing = ed.cfg,
                 None => self.settings.coding.connections.push(ed.cfg),
@@ -727,7 +769,7 @@ impl DbState {
         self.test_rx = Some(rx);
         std::thread::spawn(move || {
             let mut log = Vec::new();
-            let r = cfg.kind.connect(&cfg, timeout).ping(&mut log);
+            let r = cfg.with_secret().and_then(|cfg| cfg.kind.connect(&cfg, timeout).ping(&mut log));
             let _ = tx.send(r);
             ctx.request_repaint();
         });

@@ -7,6 +7,7 @@ mod fonts;
 mod git;
 mod languages;
 mod lint;
+mod secrets;
 mod settings;
 mod terminal;
 mod theme;

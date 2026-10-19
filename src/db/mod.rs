@@ -56,7 +56,13 @@ pub struct ConnectionConfig {
     pub kind: DriverKind,
     pub url: String,
     pub username: String,
+    /// Only used in memory, or as a plain-text fallback for settings written by
+    /// older versions or when the Keychain refused the item. Normally empty: the
+    /// password lives in the Keychain (see [`Self::keychain_password`]).
+    #[serde(skip_serializing_if = "String::is_empty")]
     pub password: String,
+    /// A password for this connection is stored in the Keychain.
+    pub keychain_password: bool,
     /// Default database; empty = server default.
     pub database: String,
 }
@@ -71,6 +77,7 @@ impl Default for ConnectionConfig {
             url: kind.default_url().into(),
             username: kind.default_user().into(),
             password: String::new(),
+            keychain_password: false,
             database: String::new(),
         }
     }
@@ -80,6 +87,16 @@ impl ConnectionConfig {
     /// Identity used to enforce "one connection per URL + user".
     pub fn identity(&self) -> (String, String) {
         (normalize_url(&self.url), self.username.trim().to_owned())
+    }
+
+    /// Copy with the password filled in from the Keychain. Call off the UI thread:
+    /// macOS may show an access prompt.
+    pub fn with_secret(&self) -> Result<ConnectionConfig, String> {
+        let mut cfg = self.clone();
+        if cfg.password.is_empty() && cfg.keychain_password {
+            cfg.password = crate::secrets::get(&cfg.id).map_err(|e| format!("Keychain: {e}"))?.unwrap_or_default();
+        }
+        Ok(cfg)
     }
 
     pub fn display_name(&self) -> String {
