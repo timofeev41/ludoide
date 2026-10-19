@@ -26,8 +26,8 @@ jobs:
     permissions:
       contents: write
     env:
-      # Set for published releases, or when a tag is given to a manual run.
-      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag }}
+      # Set for published releases, pushed v* tags, or when a tag is given to a manual run.
+      RELEASE_TAG: ${{ github.event.release.tag_name || inputs.release_tag || (startsWith(github.ref, 'refs/tags/v') && github.ref_name) || '' }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -49,4 +49,8 @@ jobs:
         if: env.RELEASE_TAG != ''
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "$RELEASE_TAG" dist/*.zip --clobber --repo "$GITHUB_REPOSITORY"
+        run: |
+          # A pushed tag has no release yet: create it, with notes generated from the commits.
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1 \
+            || gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --title "$RELEASE_TAG" --generate-notes --verify-tag
+          gh release upload "$RELEASE_TAG" dist/*.zip --clobber --repo "$GITHUB_REPOSITORY"
