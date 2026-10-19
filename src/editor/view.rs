@@ -34,7 +34,7 @@ fn is_special(e: &egui::Event, has_selection: bool) -> bool {
         egui::Event::Key { key, pressed: true, modifiers, .. } => {
             matches!(key, Key::Enter | Key::Tab)
                 || (modifiers.alt && modifiers.shift && matches!(key, Key::ArrowUp | Key::ArrowDown))
-                || (modifiers.command && *key == Key::Slash)
+                || (modifiers.command && matches!(key, Key::Slash | Key::OpenBracket | Key::CloseBracket))
         }
         egui::Event::Text(t) => {
             has_selection && t.chars().count() == 1 && ops::closing_pair(t.chars().next().unwrap()).is_some()
@@ -91,6 +91,10 @@ fn handle_keys(ui: &mut egui::Ui, doc: &mut Document, id: Id, indent: usize) {
             } else {
                 ops::insert_soft_tab(&doc.text, sel, indent)
             });
+        } else if i.consume_key(Modifiers::COMMAND, Key::CloseBracket) {
+            edit = Some(ops::indent_lines(&doc.text, sel, indent));
+        } else if i.consume_key(Modifiers::COMMAND, Key::OpenBracket) {
+            edit = Some(ops::outdent_lines(&doc.text, sel, indent));
         } else if i.consume_key(Modifiers::COMMAND, Key::Slash) {
             if let Some(prefix) = lang.line_comment {
                 edit = Some(ops::toggle_comment(&doc.text, sel, prefix));
@@ -218,6 +222,23 @@ pub fn show(ui: &mut egui::Ui, doc: &mut Document, env: &EditorEnv) {
 
             if output.response.changed() {
                 doc.mark_edited();
+            }
+            // dbt: ⌘-click on ref('model') opens the model.
+            if doc.dbt.is_some() && ui.input(|i| i.modifiers.command) {
+                if let Some(pos) = output.response.hover_pos() {
+                    let idx = output.galley.cursor_from_pos(pos - output.galley_pos).index.0;
+                    if let Some((model, (a, b))) = crate::dbt::ref_at(&doc.text, idx) {
+                        ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+                        let ra = output.galley.pos_from_cursor(CCursor::new(a)).translate(output.galley_pos.to_vec2());
+                        let rb = output.galley.pos_from_cursor(CCursor::new(b)).translate(output.galley_pos.to_vec2());
+                        if (ra.top() - rb.top()).abs() < 1.0 {
+                            ui.painter().hline(ra.left()..=rb.left(), ra.bottom() - 1.0, Stroke::new(1.0, p.accent));
+                        }
+                        if output.response.clicked() {
+                            doc.goto_ref = Some(model);
+                        }
+                    }
+                }
             }
             if let Some(r) = output.cursor_range {
                 let rr = r.as_sorted_char_range();

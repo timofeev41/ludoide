@@ -106,7 +106,8 @@ pub fn move_lines(text: &str, sel: Sel, up: bool) -> Option<Edit> {
     }
 }
 
-/// Apply `f` to each line of the selected block, then re-select the whole block.
+/// Apply `f` to each line of the selected block. The selection stays on the same
+/// text, shifted by what changed on its line (like VS Code).
 fn map_block(text: &str, sel: Sel, mut f: impl FnMut(&str) -> String) -> Edit {
     let chars: Vec<char> = text.chars().collect();
     let (bs, be) = line_block(&chars, sel);
@@ -114,10 +115,32 @@ fn map_block(text: &str, sel: Sel, mut f: impl FnMut(&str) -> String) -> Edit {
     let mapped: Vec<String> = lines.iter().map(|l| f(l)).collect();
     let block = mapped.join("\n");
     let block_len = block.chars().count();
+    let remap = |idx: usize, sticky_start: bool| -> usize {
+        if idx > be {
+            return idx + block_len - (be - bs);
+        }
+        let (mut old_start, mut new_start) = (bs, bs);
+        for (l, m) in lines.iter().zip(&mapped) {
+            let (ol, nl) = (l.chars().count(), m.chars().count());
+            if idx <= old_start + ol {
+                let col = idx - old_start;
+                if col == 0 && sticky_start {
+                    return new_start;
+                }
+                let new_col = (col as isize + nl as isize - ol as isize).clamp(0, nl as isize) as usize;
+                return new_start + new_col;
+            }
+            old_start += ol + 1;
+            new_start += nl + 1;
+        }
+        bs + block_len
+    };
+    let multi = sel.0 != sel.1;
+    let new_sel = (remap(sel.0, multi), remap(sel.1, false));
     let mut out: String = chars[..bs].iter().collect();
     out.push_str(&block);
     out.extend(&chars[be..]);
-    Edit { text: out, sel: (bs, bs + block_len) }
+    Edit { text: out, sel: (new_sel.0, new_sel.1.max(new_sel.0)) }
 }
 
 pub fn indent_lines(text: &str, sel: Sel, indent: usize) -> Edit {
@@ -292,6 +315,16 @@ mod tests {
         assert_eq!(e.text, "    a\n    b\n\nc");
         let e = outdent_lines("    a\n  b\nc", (0, 10), 4);
         assert_eq!(e.text, "a\nb\nc");
+        // The caret keeps its place in the text.
+        let e = indent_lines("ab", (1, 1), 2);
+        assert_eq!((e.text.as_str(), e.sel), ("  ab", (3, 3)));
+        let e = outdent_lines("    ab", (5, 5), 4);
+        assert_eq!(e.sel, (1, 1));
+        let e = outdent_lines("  ab", (1, 1), 4);
+        assert_eq!(e.sel, (0, 0));
+        // A multi-line selection from column 0 keeps column 0.
+        let e = indent_lines("a\nb\nc", (0, 3), 2);
+        assert_eq!(e.sel, (0, 7));
     }
 
     #[test]

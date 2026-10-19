@@ -14,6 +14,8 @@ impl App {
             ui.vertical_centered(|ui| {
                 let tools = [
                     (LeftTool::Explorer, icon::FOLDER_SIMPLE, "Explorer (⌘B)"),
+                    (LeftTool::Find, icon::MAGNIFYING_GLASS, "Find in project (⌘F)"),
+                    (LeftTool::Git, icon::GIT_BRANCH, "Git (⌘⇧G)"),
                     (LeftTool::Python, icon::FILE_PY, "Python interpreters"),
                 ];
                 for (tool, ic, tip) in tools {
@@ -106,7 +108,17 @@ impl App {
                         .and_then(|d| d.path.clone())
                         .or_else(|| self.workspace.roots.first().cloned());
                     if let Some(branch) = self.git.get(ctx_path.as_deref()) {
-                        ui.label(small(format!("{} {branch}", icon::GIT_BRANCH)));
+                        if ui
+                            .add(
+                                egui::Label::new(small(format!("{} {branch}", icon::GIT_BRANCH)))
+                                    .sense(egui::Sense::click()),
+                            )
+                            .on_hover_text("Git — click to open")
+                            .clicked()
+                        {
+                            self.left_tool = LeftTool::Git;
+                            self.left_open = true;
+                        }
                     }
                     let interp =
                         self.settings.interpreter().map_or_else(|| "No interpreter".to_owned(), |i| i.name.clone());
@@ -210,6 +222,17 @@ impl App {
                 ),
             ),
             Confirm::DeletePath(path) => ("Delete", format!("Delete '{}'? This cannot be undone.", path.display())),
+            Confirm::GitDiscard(_, changes) => (
+                "Discard changes",
+                match changes.as_slice() {
+                    [c] if c.untracked() => format!("Delete the untracked file '{}'? This cannot be undone.", c.path),
+                    [c] => format!("Discard your changes to '{}'? This cannot be undone.", c.path),
+                    many => format!(
+                        "Discard changes in {} files? Untracked files are deleted. This cannot be undone.",
+                        many.len()
+                    ),
+                },
+            ),
             Confirm::DeleteConnection(id) => (
                 "Remove connection",
                 format!("Remove connection '{}'?", self.connection(id).map(|c| c.display_name()).unwrap_or_default()),
@@ -229,6 +252,10 @@ impl App {
                     }
                     if ui.button("Don't save").clicked() {
                         choice = Some(2);
+                    }
+                } else if matches!(self.confirm, Some(Confirm::GitDiscard(..))) {
+                    if ui.button(RichText::new("Discard").color(p.error)).clicked() {
+                        choice = Some(1);
                     }
                 } else if ui.button(RichText::new("Delete").color(p.error)).clicked() {
                     choice = Some(1);
@@ -271,6 +298,7 @@ impl App {
                     Err(e) => self.error(format!("Delete failed: {e}")),
                 }
             }
+            Confirm::GitDiscard(repo, changes) => self.git_discard(&repo, &changes),
             Confirm::DeleteConnection(id) => {
                 if let Err(e) = crate::secrets::delete(&id) {
                     self.error(format!("Couldn't remove the saved password from the Keychain: {e}"));

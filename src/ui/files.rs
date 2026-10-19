@@ -1,12 +1,14 @@
 //! Explorer: workspace roots plus the always-present Scratches directory.
 
-use super::{dim, panel_frame, section_header, small_icon_button};
+use super::{copy_path_menu, dim, panel_frame, path_variants, search_field, section_header, small_icon_button};
 use crate::app::{App, Confirm, LeftTool};
+use crate::file_filter::{PathFilter, Visible};
 use crate::fonts::icon;
 use crate::languages::{self, LangId};
 use egui::{CollapsingHeader, RichText};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 #[derive(Clone)]
 pub struct Entry {
@@ -22,6 +24,8 @@ pub struct Workspace {
     pub filter: String,
     /// Bumped by "Collapse all": fresh header ids start closed.
     collapse_gen: u64,
+    /// Filter results for `(filter text, show hidden)`; dropped with the cache.
+    visible: Option<(String, bool, Rc<Visible>)>,
 }
 
 const IGNORED: &[&str] = &[".git", "__pycache__", ".DS_Store", ".idea", ".mypy_cache", ".pytest_cache", ".ruff_cache"];
@@ -35,10 +39,36 @@ impl Workspace {
 
     pub fn invalidate(&mut self, dir: &Path) {
         self.cache.remove(dir);
+        self.visible = None;
     }
 
     pub fn invalidate_all(&mut self) {
         self.cache.clear();
+        self.visible = None;
+    }
+
+    /// Salt for folder open/closed state: fresh after "Collapse all" and for each
+    /// filter text, so every search starts with its matches expanded.
+    fn open_gen(&self, filtering: bool) -> (u64, Option<String>) {
+        (self.collapse_gen, filtering.then(|| self.filter.clone()))
+    }
+
+    /// What to show for the current filter (`None` when not filtering).
+    fn visible(&mut self, roots: &[PathBuf], show_hidden: bool) -> Option<Rc<Visible>> {
+        let filter = PathFilter::parse(&self.filter);
+        if filter.is_empty() {
+            return None;
+        }
+        if let Some((text, hidden, v)) = &self.visible {
+            if *text == self.filter && *hidden == show_hidden {
+                return Some(v.clone());
+            }
+        }
+        let v = Rc::new(Visible::compute(&filter, roots, |d| {
+            self.children(d, show_hidden).into_iter().map(|e| (e.path, e.name, e.is_dir)).collect()
+        }));
+        self.visible = Some((self.filter.clone(), show_hidden, v.clone()));
+        Some(v)
     }
 
     fn children(&mut self, dir: &Path, show_hidden: bool) -> Vec<Entry> {
@@ -71,6 +101,7 @@ pub fn file_icon(path: &Path) -> &'static str {
         LangId::Yaml | LangId::Toml => icon::FILE_INI,
         LangId::Shell => icon::TERMINAL,
         LangId::Json => icon::BRACKETS_CURLY,
+        LangId::Diff => icon::GIT_DIFF,
         LangId::Plain => icon::FILE_TEXT,
     }
 }
@@ -95,7 +126,7 @@ enum Action {
     Dialog(DialogKind, PathBuf),
     Delete(PathBuf),
     Reveal(PathBuf),
-    CopyPath(PathBuf),
+    Copy(String),
     Terminal(PathBuf),
     RemoveRoot(PathBuf),
     NewScratch(PathBuf, &'static str),
@@ -113,6 +144,8 @@ impl App {
             .frame(panel_frame(p.panel, 8))
             .show(ui, |ui| match self.left_tool {
                 LeftTool::Explorer => self.explorer(ui),
+                LeftTool::Find => self.project_find_panel(ui),
+                LeftTool::Git => self.git_panel(ui),
                 LeftTool::Python => self.python_panel(ui),
             });
     }
@@ -142,15 +175,27 @@ impl App {
                 }
             });
         });
-        ui.add(
-            egui::TextEdit::singleline(&mut self.workspace.filter)
-                .hint_text(format!("{} Filter files", icon::MAGNIFYING_GLASS))
-                .desired_width(f32::INFINITY),
+        search_field(
+            ui,
+            &mut self.workspace.filter,
+            &format!("{} Filter: .sql|.yml, models/orders", icon::MAGNIFYING_GLASS),
+            &p,
+        )
+        .on_hover_text(
+            "Words separated by | or spaces are alternatives: .sql|.yml\n\
+                 A word matches file and folder names (a matching folder shows everything in it)\n\
+                 models/orders — files with \"orders\" inside folders with \"models\"\n\
+                 models/ — folders only · /orders — files only",
         );
         ui.add_space(4.0);
         let show_hidden = self.settings.other.show_hidden_files;
-        let filter = self.workspace.filter.to_lowercase();
         let scratches = self.settings.other.scratches_dir.clone();
+        let mut all_roots = self.workspace.roots.clone();
+        all_roots.push(scratches.clone());
+        let vis = self.workspace.visible(&all_roots, show_hidden);
+        let filtering = vis.is_some();
+        let open_gen = self.workspace.open_gen(filtering);
+        let default_open = self.workspace.collapse_gen == 0 || filtering;
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             let roots = self.workspace.roots.clone();
             if roots.is_empty() {
@@ -165,11 +210,12 @@ impl App {
                 let name =
                     root.file_name().map_or_else(|| root.display().to_string(), |n| n.to_string_lossy().into_owned());
                 let header = CollapsingHeader::new(RichText::new(format!("{} {name}", icon::FOLDER)).strong())
-                    .id_salt(("root", root, self.workspace.collapse_gen))
-                    .default_open(self.workspace.collapse_gen == 0)
-                    .show(ui, |ui| self.dir_tree(ui, root, &filter, show_hidden, false, &mut actions));
+                    .id_salt(("root", root, &open_gen))
+                    .default_open(default_open)
+                    .show(ui, |ui| self.dir_tree(ui, root, vis.as_deref(), false, show_hidden, false, &mut actions));
+                let v = path_variants(root, None);
                 header.header_response.on_hover_text(root.display().to_string()).context_menu(|ui| {
-                    dir_menu(ui, root, false, &mut actions);
+                    dir_menu(ui, root, false, &v, &mut actions);
                     ui.separator();
                     if ui.button("Remove from workspace").clicked() {
                         actions.push(Action::RemoveRoot(root.clone()));
@@ -180,52 +226,69 @@ impl App {
             // The permanent scratches directory is always listed, whatever project is open.
             let header =
                 CollapsingHeader::new(RichText::new(format!("{} Scratches", icon::STAR)).strong().color(p.accent))
-                    .id_salt(("scratches_root", self.workspace.collapse_gen))
-                    .default_open(self.workspace.collapse_gen == 0)
-                    .show(ui, |ui| self.dir_tree(ui, &scratches, &filter, show_hidden, true, &mut actions));
+                    .id_salt(("scratches_root", &open_gen))
+                    .default_open(default_open)
+                    .show(ui, |ui| {
+                        self.dir_tree(ui, &scratches, vis.as_deref(), false, show_hidden, true, &mut actions)
+                    });
             header
                 .header_response
                 .on_hover_text(format!(
                     "{}\nSQL runs on the active connection, Python on the selected interpreter",
                     scratches.display()
                 ))
-                .context_menu(|ui| dir_menu(ui, &scratches, true, &mut actions));
+                .context_menu(|ui| dir_menu(ui, &scratches, true, &path_variants(&scratches, None), &mut actions));
         });
         self.apply_file_actions(actions, ui.ctx());
     }
 
+    /// `vis`: the filter result (`None` = no filter); `full`: an ancestor folder
+    /// matched the filter, so everything below it is shown.
+    #[allow(clippy::too_many_arguments)]
     fn dir_tree(
         &mut self,
         ui: &mut egui::Ui,
         dir: &Path,
-        filter: &str,
+        vis: Option<&Visible>,
+        full: bool,
         hidden: bool,
         scratch: bool,
         actions: &mut Vec<Action>,
     ) {
         let p = self.palette;
-        let entries = self.workspace.children(dir, hidden);
+        let filter = if full { None } else { vis };
+        let entries: Vec<Entry> = self
+            .workspace
+            .children(dir, hidden)
+            .into_iter()
+            .filter(|e| filter.is_none_or(|v| v.shown.contains(&e.path)))
+            .collect();
         if entries.is_empty() {
-            ui.label(dim("empty", &p).small());
+            ui.label(dim(if filter.is_some() { "no matches" } else { "empty" }, &p).small());
         }
         let active = self.tabs.current().and_then(|d| d.path.clone());
+        let open_gen = self.workspace.open_gen(vis.is_some());
+        let root = self.root_for(dir);
         for e in entries {
+            let variants = || path_variants(&e.path, root.as_deref());
             if e.is_dir {
+                let full = full || vis.is_some_and(|v| v.full.contains(&e.path));
                 let r = CollapsingHeader::new(format!("{} {}", icon::FOLDER, e.name))
-                    .id_salt(("dir", &e.path, self.workspace.collapse_gen))
-                    .default_open(!filter.is_empty())
-                    .show(ui, |ui| self.dir_tree(ui, &e.path, filter, hidden, scratch, actions));
-                r.header_response.context_menu(|ui| dir_menu(ui, &e.path, scratch, actions));
+                    .id_salt(("dir", &e.path, &open_gen))
+                    .default_open(filter.is_some())
+                    .show(ui, |ui| self.dir_tree(ui, &e.path, vis, full, hidden, scratch, actions));
+                let v = variants();
+                r.header_response.context_menu(|ui| dir_menu(ui, &e.path, scratch, &v, actions));
             } else {
-                if !filter.is_empty() && !e.name.to_lowercase().contains(filter) {
-                    continue;
-                }
                 let selected = active.as_deref() == Some(e.path.as_path());
                 let text = RichText::new(format!("{} {}", file_icon(&e.path), e.name));
-                let r = ui.selectable_label(selected, text);
+                // One line per file: long names are cut with "…" (full name on hover).
+                let r = ui.add(egui::Button::selectable(selected, text).truncate());
                 if r.clicked() {
                     actions.push(Action::Open(e.path.clone()));
                 }
+                let r = r.on_hover_text(&e.name);
+                let v = variants();
                 r.context_menu(|ui| {
                     if ui.button("Open").clicked() {
                         actions.push(Action::Open(e.path.clone()));
@@ -233,8 +296,8 @@ impl App {
                     if ui.button("Rename…").clicked() {
                         actions.push(Action::Dialog(DialogKind::Rename, e.path.clone()));
                     }
-                    if ui.button("Copy path").clicked() {
-                        actions.push(Action::CopyPath(e.path.clone()));
+                    if let Some(text) = copy_path_menu(ui, &v) {
+                        actions.push(Action::Copy(text));
                     }
                     if ui.button(reveal_label()).clicked() {
                         actions.push(Action::Reveal(e.path.clone()));
@@ -262,7 +325,7 @@ impl App {
                 }
                 Action::Delete(path) => self.confirm = Some(Confirm::DeletePath(path)),
                 Action::Reveal(path) => reveal(&path),
-                Action::CopyPath(path) => ctx.copy_text(path.display().to_string()),
+                Action::Copy(text) => ctx.copy_text(text),
                 Action::Terminal(dir) => self.new_terminal(None, None, Some(dir), ctx),
                 Action::RemoveRoot(root) => self.workspace.roots.retain(|r| r != &root),
                 Action::NewScratch(dir, ext) => self.new_scratch(&dir, ext),
@@ -355,7 +418,13 @@ impl App {
     }
 }
 
-fn dir_menu(ui: &mut egui::Ui, dir: &Path, scratch: bool, actions: &mut Vec<Action>) {
+fn dir_menu(
+    ui: &mut egui::Ui,
+    dir: &Path,
+    scratch: bool,
+    variants: &[(&'static str, String)],
+    actions: &mut Vec<Action>,
+) {
     if scratch {
         for (label, ext) in [
             ("New SQL scratch", "sql"),
@@ -387,8 +456,8 @@ fn dir_menu(ui: &mut egui::Ui, dir: &Path, scratch: bool, actions: &mut Vec<Acti
     if ui.button("Open in terminal").clicked() {
         actions.push(Action::Terminal(dir.to_path_buf()));
     }
-    if ui.button("Copy path").clicked() {
-        actions.push(Action::CopyPath(dir.to_path_buf()));
+    if let Some(text) = copy_path_menu(ui, variants) {
+        actions.push(Action::Copy(text));
     }
     if ui.button(reveal_label()).clicked() {
         actions.push(Action::Reveal(dir.to_path_buf()));

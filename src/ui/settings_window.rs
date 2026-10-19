@@ -13,11 +13,12 @@ pub enum SettingsTab {
     Coding,
     Terminal,
     Others,
+    Shortcuts,
 }
 
 impl SettingsTab {
-    const ALL: [SettingsTab; 4] =
-        [SettingsTab::General, SettingsTab::Coding, SettingsTab::Terminal, SettingsTab::Others];
+    const ALL: [SettingsTab; 5] =
+        [SettingsTab::General, SettingsTab::Coding, SettingsTab::Terminal, SettingsTab::Others, SettingsTab::Shortcuts];
 
     fn label(self) -> &'static str {
         match self {
@@ -25,6 +26,7 @@ impl SettingsTab {
             SettingsTab::Coding => "Coding",
             SettingsTab::Terminal => "Terminal",
             SettingsTab::Others => "Others",
+            SettingsTab::Shortcuts => "Shortcuts",
         }
     }
 }
@@ -67,6 +69,7 @@ impl App {
                                 SettingsTab::Coding => self.coding_settings(ui),
                                 SettingsTab::Terminal => self.terminal_settings(ui),
                                 SettingsTab::Others => self.other_settings(ui),
+                                SettingsTab::Shortcuts => self.shortcuts_settings(ui),
                             }
                         });
                     });
@@ -74,6 +77,27 @@ impl App {
                 let _ = p;
             });
         self.settings_open = open;
+    }
+
+    /// Read-only list of every shortcut.
+    fn shortcuts_settings(&mut self, ui: &mut egui::Ui) {
+        let p = self.palette;
+        ui.label(dim("⌘ is Ctrl on Linux and Windows. Shortcuts can't be changed yet.", &p).small());
+        for g in crate::shortcuts::GROUPS {
+            ui.add_space(10.0);
+            section_header(ui, g.name, &p);
+            ui.add_space(2.0);
+            egui::Grid::new(("shortcuts", g.name)).num_columns(2).spacing([24.0, 6.0]).striped(true).show(ui, |ui| {
+                for (keys, what) in g.items {
+                    ui.horizontal(|ui| {
+                        ui.set_min_width(170.0);
+                        ui.label(RichText::new(*keys).monospace().color(p.accent));
+                    });
+                    ui.label(*what);
+                    ui.end_row();
+                }
+            });
+        }
     }
 
     fn general_settings(&mut self, ui: &mut egui::Ui) {

@@ -315,6 +315,58 @@ fn resolve(inner: &str, values: &HashMap<String, String>, schema: &str, model: &
     }
 }
 
+/// The `ref('model')` call under char index `idx`: the model name and the
+/// call's char range (for underlining).
+pub fn ref_at(text: &str, idx: usize) -> Option<(String, (usize, usize))> {
+    let byte = text.char_indices().nth(idx).map_or(text.len(), |(b, _)| b);
+    let tag = tags(text).into_iter().find(|t| t.kind == TagKind::Expr && t.start <= byte && byte < t.end)?;
+    let body = &text[tag.start..tag.end];
+    let mut from = 0;
+    while let Some(pos) = body[from..].find("ref(") {
+        let start = from + pos;
+        from = start + 4;
+        // `ref(` must not be the tail of another name (e.g. `my_ref(`).
+        if body[..start].chars().next_back().is_some_and(|c| c.is_alphanumeric() || c == '_') {
+            continue;
+        }
+        let close = start + body[start..].find(')')? + 1;
+        let (a, b) = (tag.start + start, tag.start + close);
+        if (a..b).contains(&byte) {
+            let model = parse_call(&body[start..close])?.args.last()?.clone();
+            let ca = text[..a].chars().count();
+            return Some((model, (ca, ca + text[a..b].chars().count())));
+        }
+    }
+    None
+}
+
+impl DbtProject {
+    /// The file defining model `name` (`<name>.sql` or `.py`) anywhere in the project.
+    pub fn find_model(&self, name: &str) -> Option<PathBuf> {
+        const SKIP: &[&str] = &["target", "dbt_packages", "dbt_modules", "logs", "node_modules"];
+        let wanted = [format!("{name}.sql"), format!("{name}.py")];
+        let mut stack = vec![self.root.clone()];
+        let mut found = Vec::new();
+        while let Some(dir) = stack.pop() {
+            let Ok(rd) = std::fs::read_dir(&dir) else { continue };
+            for e in rd.flatten() {
+                let fname = e.file_name().to_string_lossy().into_owned();
+                let path = e.path();
+                if path.is_dir() {
+                    if !fname.starts_with('.') && !SKIP.contains(&fname.as_str()) {
+                        stack.push(path);
+                    }
+                } else if wanted.contains(&fname) {
+                    found.push(path);
+                }
+            }
+        }
+        // Prefer real models over e.g. analyses/tests with the same name.
+        found.sort_by_key(|p| (!p.starts_with(self.root.join("models")), p.extension().is_some_and(|e| e != "sql")));
+        found.into_iter().next()
+    }
+}
+
 /// Where a compiled model is written: `<scratches>/compiled/<project>/<stem>_cmp_<timestamp>.sql`.
 pub fn output_path(scratches: &Path, project: &str, model_path: &Path) -> PathBuf {
     let stem = model_path.file_stem().unwrap_or_default().to_string_lossy();
@@ -389,6 +441,19 @@ group by d
     }
 
     #[test]
+    fn finds_ref_under_cursor() {
+        let t = "select * from {{ ref('orders') }} o join {{ref(\"dim\")}}";
+        let at = |needle: &str| t.chars().count() - t[t.find(needle).unwrap()..].chars().count();
+        let (m, (a, b)) = ref_at(t, at("orders")).unwrap();
+        assert_eq!(m, "orders");
+        assert_eq!(&t[a..b], "ref('orders')");
+        assert_eq!(ref_at(t, at("dim")).unwrap().0, "dim");
+        assert!(ref_at(t, at("select")).is_none());
+        assert!(ref_at("{{ my_ref('x') }}", 5).is_none());
+        assert_eq!(ref_at("{{ ref('pkg', 'm') }}", 4).unwrap().0, "m");
+    }
+
+    #[test]
     fn detects_project() {
         let dir = std::env::temp_dir().join(format!("ludo-dbt-{}", crate::db::new_id()));
         std::fs::create_dir_all(dir.join("models/marts")).unwrap();
@@ -397,6 +462,11 @@ group by d
         assert_eq!(p.name, "attribution");
         assert_eq!(p.default_schema(), "attribution_marts");
         assert!(DbtProject::for_file(&dir.join("models/marts/x.py")).is_none());
+        std::fs::write(dir.join("models/marts/orders.sql"), "select 1").unwrap();
+        std::fs::create_dir_all(dir.join("target/compiled")).unwrap();
+        std::fs::write(dir.join("target/compiled/orders.sql"), "select 1").unwrap();
+        assert_eq!(p.find_model("orders"), Some(dir.join("models/marts/orders.sql")));
+        assert_eq!(p.find_model("nope"), None);
         std::fs::remove_dir_all(dir).unwrap();
     }
 }

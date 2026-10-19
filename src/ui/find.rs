@@ -1,4 +1,4 @@
-//! Find / replace bar for the active editor (⌘F).
+//! Find / replace bar for the active editor (⌘R).
 
 use super::{dim, small_icon_button};
 use crate::app::App;

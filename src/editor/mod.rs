@@ -47,6 +47,8 @@ pub struct Document {
     pub pending_select: Option<(usize, usize)>,
     /// dbt project this file belongs to (enables Compile).
     pub dbt: Option<crate::dbt::DbtProject>,
+    /// Model name from a ⌘-click on `ref('…')`, handled by the app.
+    pub goto_ref: Option<String>,
 }
 
 fn next_uid() -> u64 {
@@ -92,6 +94,7 @@ impl Document {
             deferred_events: Vec::new(),
             pending_select: None,
             dbt: None,
+            goto_ref: None,
         }
     }
 

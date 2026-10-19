@@ -38,14 +38,15 @@ It's built for ClickHouse work, benthos/dbt YAML, SQL scratches and the odd Airf
   - drops `config()` and `{% if is_incremental() %}` blocks
   - writes the result to `Scratches/compiled/<project>/<model>_cmp_<timestamp>.sql` and opens it, ready to run.
 - Macros and loops it can't resolve are left as-is, and Ludo lists them.
+- `⌘`-click a `ref('model')` to open that model's file (searched across the project, preferring `models/`).
 
 **Editor**
 - Up to 10 tabs (when you open an 11th, the least recently used *saved* tab closes). Tabs and folders are restored on the next launch.
-- Syntax highlighting for SQL, Python, YAML, Shell, Markdown, JSON and TOML.
+- Syntax highlighting for SQL, Python, YAML, Shell, Markdown, JSON, TOML and diffs.
 - Selection + `(` `[` `{` `<` `"` `'` `` ` `` wraps the selection.
-- `⌥⇧↑` / `⌥⇧↓` move the current line(s), `Tab` / `⇧Tab` indent/outdent the selected lines,
+- `⌥⇧↑` / `⌥⇧↓` move the current line(s), `⌘]` / `⌘[` (or `Tab` / `⇧Tab`) indent/outdent the line(s), keeping the cursor in place,
   `⌘/` toggles comments (`--` for SQL, `#` for Python/Shell/YAML). Enter keeps indentation and adds a level after `:` `(` `[` `{`.
-- `⌘F` find / replace.
+- `⌘R` find / replace in the current file.
 - YAML lint: syntax errors, duplicate keys (reported on the duplicate line), tab indentation, odd indentation, trailing whitespace.
 - Markdown: edit, split view or preview (toolbar toggles).
 
@@ -53,9 +54,28 @@ It's built for ClickHouse work, benthos/dbt YAML, SQL scratches and the odd Airf
 - One or several folders per workspace (Explorer → *Add folder*), with new/rename/delete/reveal in the context menu.
 - **Open in Claude** in the folder context menu starts Claude Code in that project's root (or in Scratches).
 - **Collapse all** button in the Explorer header.
+- **Filter** (same rules as the Databases search, × clears it): `.sql|.yml` shows only matching files, and folders
+  without matches are hidden. A word that matches a folder name shows that whole folder. `models/orders` finds files
+  with "orders" inside folders with "models"; `models/` matches folders only, `/orders` files only.
+- **Copy path ▸** offers the absolute path, the path from the project (`attribution/models/x.sql`), the path relative to
+  the project (`models/x.sql`), the file name and the name without extension.
+- **Find in project** (`⌘F`, magnifier in the left bar): searches file names and contents in every workspace folder
+  and Scratches as you type. *Aa* matches case; *Files to include* takes the Explorer filter syntax (`.sql`, `models/`).
+  Click a result to jump to the match. `node_modules`, `target`, `dbt_packages`, virtualenvs and binary files are skipped.
 - **Scratches** (`~/LudoScratches`, configurable) are always listed, whatever project is open. You can make subfolders and
   SQL/Python/shell/Markdown scratches; `⌘N` creates a new SQL scratch. SQL scratches run on the active connection,
   Python scratches on the selected interpreter.
+
+**Git** (branch icon in the left bar, `⌘⇧G`, or click the branch in the status bar)
+- Uses your `git`, so credentials and hooks work as in the terminal (it never waits on a password prompt; it reports the error instead).
+- Changes and staged changes, with stage (+), unstage (−), discard (↺, asks first; untracked files are deleted) and open file.
+  Click a file for its diff. Right-click a section header to stage, unstage or discard everything.
+- Commit message + **Commit** (`⌘↵` in the message box). With nothing staged it commits everything, like VS Code.
+  The ▾ menu has *Commit & push* and *Amend last commit*.
+- **Pull** / **Push** show how many commits you're behind/ahead. The first push of a new branch sets its upstream.
+  ☁ fetches all remotes.
+- The branch menu switches branches (local, or remote ones as a tracking branch) and creates a new branch from the current one.
+- With several repositories in the workspace, pick one at the top (it follows the file you're editing).
 
 **Terminals and Python**
 - Several terminal sessions (a real PTY with 256 colors and truecolor). Double-click a tab to rename it. Each one starts as a login shell in the project root.
@@ -65,19 +85,23 @@ It's built for ClickHouse work, benthos/dbt YAML, SQL scratches and the odd Airf
 - **Claude Code**: the ✨ button opens `claude` in a terminal in the current project. The editor toolbar's ✨ starts it with the current file as context.
 
 **Settings** (`⌘,`) are split into *General* (theme, interface/editor font from system fonts, font size, scale in 10% steps, indentation 2/4/6),
-*Coding* (interpreters, connections, linting, limits), *Terminal* (shell, font size, scrollback, env vars) and *Others*
-(scratches folder, session restore, autosave, Claude command). They're stored in `~/Library/Application Support/ludo/settings.json`.
+*Coding* (interpreters, connections, linting, limits), *Terminal* (shell, font size, scrollback, env vars), *Others*
+(scratches folder, session restore, autosave, Claude command) and *Shortcuts* (a read-only list of every shortcut). They're stored in `~/Library/Application Support/ludo/settings.json`.
 
 ## Shortcuts
+
+The full list is in Settings → *Shortcuts*. The main ones:
 
 | Action | Keys |
 |---|---|
 | Run statement / selection · run script | `⌘↵` · `⌘⇧↵` |
+| Find in project · find / replace in file | `⌘F` (or `⌘⇧F`) · `⌘R` |
+| Indent · outdent · comment | `⌘]` · `⌘[` · `⌘/` |
+| Open a dbt `ref('model')` | `⌘`-click |
 | Next / previous tab | `⌃Tab` / `⌃⇧Tab` (also `⌘⇧]` / `⌘⇧[`), `⌘1…9` |
 | Save · close tab · new SQL scratch | `⌘S` · `⌘W` · `⌘N` |
-| Toggle explorer · bottom panel · databases | `⌘B` · `⌘J` · `⌘⇧D` |
+| Toggle explorer · bottom panel · databases · Git | `⌘B` · `⌘J` · `⌘⇧D` · `⌘⇧G` |
 | New terminal | `⌘⇧`` ` |
-| Find / replace | `⌘F` |
 | Zoom interface | `⌘+` / `⌘-` |
 | Settings | `⌘,` |
 
@@ -108,7 +132,12 @@ src/
   lint/             sql.rs, yaml.rs                  (add a linter: a module + a match arm)
   db/               Driver trait, ClickHouse driver, background worker
   terminal.rs       PTY + vt100 terminal widget
-  ui/               panels: explorer, databases, bottom panel, settings, find bar, chrome
+  git.rs            branch for the status bar + git CLI operations
+  dbt.rs            dbt project detection, Jinja-aware lint, compile, ref() lookup
+  file_filter.rs    Explorer filter syntax
+  project_search.rs Find in project (background search)
+  shortcuts.rs      the shortcut list shown in Settings
+  ui/               panels: explorer, find, git, databases, bottom panel, settings, find bar, chrome
 ```
 
 ### Adding a database engine

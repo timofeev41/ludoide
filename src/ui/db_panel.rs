@@ -221,10 +221,11 @@ impl App {
                         }
                     });
                 });
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.db.filter)
-                        .hint_text(format!("{} Search: ad|timofeev, db.table", icon::MAGNIFYING_GLASS))
-                        .desired_width(f32::INFINITY),
+                super::search_field(
+                    ui,
+                    &mut self.db.filter,
+                    &format!("{} Search: ad|timofeev, db.table", icon::MAGNIFYING_GLASS),
+                    &p,
                 )
                 .on_hover_text(
                     "Case-insensitive search across databases and tables.\n\
@@ -961,7 +962,9 @@ fn visible_databases_ui(
         return;
     };
     ui.horizontal(|ui| {
-        ui.add(egui::TextEdit::singleline(&mut ed.db_search).hint_text("filter: ad|timofeev").desired_width(220.0));
+        ui.allocate_ui(egui::vec2(220.0, ui.spacing().interact_size.y), |ui| {
+            super::search_field(ui, &mut ed.db_search, "filter: ad|timofeev", p)
+        });
         let search = Search::parse(&ed.db_search);
         let matching: Vec<&String> = known.iter().filter(|d| search.is_empty() || search.db_matches(d)).collect();
         if ui.small_button(format!("Select {}", matching.len())).on_hover_text("Select all matching").clicked() {

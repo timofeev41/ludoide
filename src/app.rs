@@ -22,6 +22,8 @@ use std::time::{Duration, Instant};
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum LeftTool {
     Explorer,
+    Find,
+    Git,
     Python,
 }
 
@@ -35,6 +37,7 @@ pub enum Confirm {
     CloseDirty(usize),
     DeletePath(PathBuf),
     DeleteConnection(String),
+    GitDiscard(PathBuf, Vec<crate::git::Change>),
 }
 
 #[derive(Clone, PartialEq)]
@@ -76,6 +79,10 @@ pub struct App {
     pub find: Option<crate::ui::find::FindState>,
     pub compile: Option<crate::ui::dbt_compile::CompileDialog>,
     pub toast_text: Option<String>,
+    pub project_find: crate::ui::project_find::ProjectFind,
+    pub git_ui: crate::ui::git_panel::GitPanel,
+    /// Tab last scrolled into view in the tab strip.
+    pub tab_in_view: u64,
 }
 
 impl App {
@@ -112,6 +119,9 @@ impl App {
             find: None,
             compile: None,
             toast_text: None,
+            project_find: Default::default(),
+            git_ui: Default::default(),
+            tab_in_view: 0,
         };
         app.migrate_passwords();
         if app.settings.other.restore_session {
@@ -333,6 +343,17 @@ impl App {
         self.bottom_tab = BottomTab::Results;
     }
 
+    /// Open the model of a ⌘-clicked `ref('…')` in the current dbt file.
+    fn follow_ref(&mut self) {
+        let Some(doc) = self.tabs.current_mut() else { return };
+        let Some(model) = doc.goto_ref.take() else { return };
+        let Some(project) = doc.dbt.clone() else { return };
+        match project.find_model(&model) {
+            Some(path) => self.open_file(&path),
+            None => self.error(format!("Model '{model}' not found in dbt project '{}'", project.name)),
+        }
+    }
+
     pub fn new_scratch(&mut self, dir: &Path, ext: &str) {
         let _ = std::fs::create_dir_all(dir);
         let stamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
@@ -469,8 +490,23 @@ impl App {
                 self.tabs.activate(i);
             }
         }
-        if pressed(sc(cmd, Key::F)) {
+        // ⌘↵ in the commit message commits rather than running SQL.
+        if self.left_open
+            && self.left_tool == LeftTool::Git
+            && self.git_ui.message_focused
+            && pressed(sc(cmd, Key::Enter))
+        {
+            self.git_commit_shortcut(ctx);
+        }
+        if pressed(sc(cmd | Modifiers::SHIFT, Key::F)) || pressed(sc(cmd, Key::F)) {
+            self.open_project_find();
+        }
+        if pressed(sc(cmd, Key::R)) {
             self.open_find();
+        }
+        if pressed(sc(cmd | Modifiers::SHIFT, Key::G)) {
+            self.left_tool = LeftTool::Git;
+            self.left_open = true;
         }
         if pressed(sc(cmd, Key::S)) {
             self.save_current();
@@ -649,6 +685,7 @@ impl eframe::App for App {
             self.bottom_panel(ui);
         }
         self.editor_area(ui);
+        self.follow_ref();
         self.dialogs(&ctx);
         if self.settings_open {
             self.settings_window(&ctx);

@@ -53,6 +53,28 @@ pub fn highlight(text: &str, lang: &Language, font: FontId, p: &Palette) -> Layo
             push(&mut job, text, Tok::Plain);
             return job;
         }
+        LangId::Diff => {
+            for line in text.split_inclusive('\n') {
+                let mut fmt = TextFormat::simple(font.clone(), p.text);
+                if line.starts_with("+++")
+                    || line.starts_with("---")
+                    || line.starts_with("diff ")
+                    || line.starts_with("index ")
+                {
+                    fmt.color = p.text_dim;
+                } else if line.starts_with('+') {
+                    fmt.color = p.success;
+                    fmt.background = p.success.gamma_multiply(0.12);
+                } else if line.starts_with('-') {
+                    fmt.color = p.error;
+                    fmt.background = p.error.gamma_multiply(0.12);
+                } else if line.starts_with("@@") {
+                    fmt.color = p.accent;
+                }
+                job.append(line, 0.0, fmt);
+            }
+            return job;
+        }
         _ => {}
     }
 

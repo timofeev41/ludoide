@@ -1,6 +1,6 @@
 //! Central area: tab strip, per-file toolbar, editor / Markdown preview.
 
-use super::{dim, small_icon_button};
+use super::{copy_path_menu, dim, path_variants, small_icon_button};
 use crate::app::App;
 use crate::editor::{MAX_TABS, MdMode, view};
 use crate::fonts::icon;
@@ -54,6 +54,7 @@ impl App {
         let mut activate = None;
         let mut close_others = None;
         let mut copy = None;
+        let mut scrolled = None;
         egui::Frame::new().fill(p.panel).inner_margin(egui::Margin::symmetric(4, 0)).show(ui, |ui| {
             egui::ScrollArea::horizontal().id_salt("tabs_scroll").show(ui, |ui| {
                 ui.horizontal(|ui| {
@@ -61,36 +62,19 @@ impl App {
                     for (i, doc) in self.tabs.docs.iter().enumerate() {
                         let selected = i == self.tabs.active;
                         let path_icon = doc.path.as_deref().map_or(icon::FILE_DASHED, file_icon);
-                        let fill = if selected { p.bg } else { p.panel };
-                        let r =
-                            egui::Frame::new().fill(fill).inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.x = 6.0;
-                                ui.label(RichText::new(path_icon).color(if selected { p.accent } else { p.text_dim }));
-                                let name = RichText::new(doc.name());
-                                ui.label(if selected { name.color(p.text) } else { name.color(p.text_dim) });
-                                let marker = if doc.is_dirty() { icon::CIRCLE } else { icon::X };
-                                if ui
-                                    .add(
-                                        egui::Button::new(RichText::new(marker).small().color(p.text_dim)).frame(false),
-                                    )
-                                    .on_hover_text("Close (⌘W)")
-                                    .clicked()
-                                {
-                                    close = Some(i);
-                                }
-                            });
-                        if selected {
-                            let rect = r.response.rect;
-                            ui.painter().hline(rect.x_range(), rect.top() + 1.0, egui::Stroke::new(2.0, p.accent));
+                        let (resp, close_clicked) =
+                            editor_tab(ui, path_icon, &doc.name(), doc.is_dirty(), selected, doc.uid, &p);
+                        if selected && self.tab_in_view != doc.uid {
+                            resp.scroll_to_me(None);
+                            scrolled = Some(doc.uid);
                         }
-                        let resp = r.response.interact(egui::Sense::click());
-                        if resp.clicked() {
+                        if close_clicked || resp.middle_clicked() {
+                            close = Some(i);
+                        } else if resp.clicked() {
                             activate = Some(i);
                         }
-                        if resp.middle_clicked() {
-                            close = Some(i);
-                        }
                         let tip = doc.path.as_ref().map_or_else(|| doc.title.clone(), |p| p.display().to_string());
+                        let variants = doc.path.as_deref().map(|pth| path_variants(pth, self.root_for(pth).as_deref()));
                         resp.on_hover_text(tip).context_menu(|ui| {
                             if ui.button("Close").clicked() {
                                 close = Some(i);
@@ -98,9 +82,10 @@ impl App {
                             if ui.button("Close others").clicked() {
                                 close_others = Some(i);
                             }
-                            if let Some(path) = &doc.path {
-                                if ui.button("Copy path").clicked() {
-                                    copy = Some(path.display().to_string());
+                            if let Some(v) = &variants {
+                                ui.separator();
+                                if let Some(text) = copy_path_menu(ui, v) {
+                                    copy = Some(text);
                                 }
                             }
                         });
@@ -113,6 +98,9 @@ impl App {
                 });
             });
         });
+        if let Some(uid) = scrolled {
+            self.tab_in_view = uid;
+        }
         if let Some(i) = activate {
             self.tabs.activate(i);
         }
@@ -332,7 +320,8 @@ impl App {
                 ("Switch tabs", "Ctrl+Tab / Ctrl+Shift+Tab"),
                 ("Toggle explorer / panel / databases", "⌘B / ⌘J / ⌘⇧D"),
                 ("New terminal", "⌘⇧`"),
-                ("Find / replace", "⌘F"),
+                ("Find in project / in file", "⌘F / ⌘R"),
+                ("Git", "⌘⇧G"),
                 ("Settings", "⌘,"),
             ];
             for (a, k) in rows {
@@ -344,7 +333,12 @@ impl App {
                     ui.label(RichText::new(k).monospace());
                 });
             }
-            ui.add_space(18.0);
+            ui.add_space(6.0);
+            if ui.link(dim("All shortcuts…", &p).small()).clicked() {
+                self.settings_tab = crate::ui::settings_window::SettingsTab::Shortcuts;
+                self.settings_open = true;
+            }
+            ui.add_space(12.0);
             if ui.button(format!("{} Open folder…", icon::FOLDER_OPEN)).clicked() {
                 if let Some(dir) = rfd::FileDialog::new().pick_folder() {
                     self.workspace.add_root(dir);
@@ -360,4 +354,61 @@ fn markdown_preview(ui: &mut egui::Ui, cache: &mut egui_commonmark::CommonMarkCa
             egui_commonmark::CommonMarkViewer::new().show(ui, cache, text);
         });
     });
+}
+
+/// One editor tab: icon, name and a close button, all centred on one line. The
+/// close button gets its own hit area on top of the tab's.
+fn editor_tab(
+    ui: &mut egui::Ui,
+    file_icon: &str,
+    name: &str,
+    dirty: bool,
+    selected: bool,
+    uid: u64,
+    p: &crate::theme::Palette,
+) -> (egui::Response, bool) {
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let small = egui::TextStyle::Small.resolve(ui.style());
+    let text_color = if selected { p.text } else { p.text_dim };
+    let icon_g = ui.painter().layout_no_wrap(file_icon.to_owned(), font.clone(), egui::Color32::PLACEHOLDER);
+    let name_g = ui.painter().layout_no_wrap(name.to_owned(), font.clone(), text_color);
+    let (pad, gap, close_w) = (10.0, 6.0, 18.0);
+    let h = font.size + 18.0;
+    let w = pad + icon_g.size().x + gap + name_g.size().x + gap + close_w + pad - 4.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, h), egui::Sense::click());
+    let close_rect = egui::Rect::from_center_size(
+        egui::pos2(rect.right() - pad + 4.0 - close_w / 2.0, rect.center().y),
+        egui::vec2(close_w, close_w),
+    );
+    let close = ui.interact(close_rect, egui::Id::unique(("tab_close", uid)), egui::Sense::click());
+    if ui.is_rect_visible(rect) {
+        let painter = ui.painter();
+        let fill = if selected {
+            p.bg
+        } else if resp.hovered() || close.hovered() {
+            p.hover
+        } else {
+            p.panel
+        };
+        painter.rect_filled(rect, 0.0, fill);
+        if selected {
+            painter.hline(rect.x_range(), rect.top() + 1.0, egui::Stroke::new(2.0, p.accent));
+        }
+        let cy = rect.center().y;
+        let mut x = rect.left() + pad;
+        let icon_color = if selected { p.accent } else { p.text_dim };
+        painter.galley(egui::pos2(x, cy - icon_g.size().y / 2.0), icon_g.clone(), icon_color);
+        x += icon_g.size().x + gap;
+        painter.galley(egui::pos2(x, cy - name_g.size().y / 2.0), name_g, text_color);
+        // A dot marks unsaved changes; hovering turns it into the close button.
+        let show_x = !dirty || close.hovered();
+        if close.hovered() {
+            painter.rect_filled(close_rect, 4.0, p.panel_alt);
+        }
+        let glyph = if show_x { icon::X } else { icon::CIRCLE };
+        let color = if close.hovered() { p.text } else { p.text_dim };
+        painter.text(close_rect.center(), egui::Align2::CENTER_CENTER, glyph, small, color);
+    }
+    let clicked = close.on_hover_text("Close (⌘W)").clicked();
+    (resp, clicked)
 }

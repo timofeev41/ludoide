@@ -11,6 +11,7 @@ pub enum LangId {
     Markdown,
     Json,
     Toml,
+    Diff,
     Plain,
 }
 
@@ -388,6 +389,17 @@ pub static LANGUAGES: &[Language] = &[
         file_names: &[],
         line_comment: Some("#"),
         keywords: JSON_KEYWORDS,
+        builtins: &[],
+        runner: Runner::None,
+        previewable: false,
+    },
+    Language {
+        id: LangId::Diff,
+        name: "Diff",
+        extensions: &["diff", "patch"],
+        file_names: &[],
+        line_comment: None,
+        keywords: &[],
         builtins: &[],
         runner: Runner::None,
         previewable: false,
